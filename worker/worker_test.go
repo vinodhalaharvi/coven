@@ -216,6 +216,13 @@ func TestFSSource_IgnoresNonGoFiles(t *testing.T) {
 
 func TestFSSource_ChangedFilesPopulated(t *testing.T) {
 	dir := mustTempPkg(t, "package x\n")
+	// On macOS, t.TempDir() lives under /var/folders/... where /var is a
+	// symlink to /private/var. FSSource resolves symlinks internally, so
+	// fsnotify reports paths under /private/var/.... Resolve the test's
+	// dir the same way for comparison.
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = r
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 

@@ -9,7 +9,10 @@
 // behavior-only, and any implementation is interchangeable for callers.
 package ownership
 
-import "sync"
+import (
+	"path/filepath"
+	"sync"
+)
 
 // AgentID identifies an owning agent. Mirrors supervisor.AgentID-style strings.
 type AgentID string
@@ -42,7 +45,34 @@ func New() *InMemory {
 	return &InMemory{owners: make(map[string]AgentID)}
 }
 
+// canonicalize returns the path with symlinks resolved when possible.
+// On macOS /tmp -> /private/tmp and /var -> /private/var; fsnotify events
+// arrive with the resolved path while callers often hold the unresolved
+// form. Storing resolved-only keys removes that asymmetry.
+//
+// If EvalSymlinks fails (e.g. a path that doesn't yet exist on disk —
+// which happens when an agent claims a generated file before writing it
+// in some flows), the input path is returned unchanged. The asymmetry
+// in that case is acceptable: a not-yet-existing file can't have an
+// fsnotify event delivered for it anyway.
+func canonicalize(path string) string {
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		return r
+	}
+	// Try to canonicalize the parent directory and rejoin — covers the
+	// "claim before write" case where the file doesn't exist yet but its
+	// directory does.
+	dir, base := filepath.Split(path)
+	if dir != "" {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, base)
+		}
+	}
+	return path
+}
+
 func (r *InMemory) Claim(path string, agent AgentID) (AgentID, bool) {
+	path = canonicalize(path)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	prev, existed := r.owners[path]
@@ -51,6 +81,7 @@ func (r *InMemory) Claim(path string, agent AgentID) (AgentID, bool) {
 }
 
 func (r *InMemory) Release(path string) bool {
+	path = canonicalize(path)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.owners[path]; !ok {
@@ -61,6 +92,7 @@ func (r *InMemory) Release(path string) bool {
 }
 
 func (r *InMemory) Owner(path string) (AgentID, bool) {
+	path = canonicalize(path)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	a, ok := r.owners[path]

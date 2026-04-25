@@ -29,13 +29,10 @@ func TestExecRunner_WorkDirIsProtoRoot(t *testing.T) {
 		t.Fatalf("pwd should succeed: %v; output=%s", err, output)
 	}
 
-	// macOS: protoRoot may resolve through /private/...; do the same lookup.
-	expected := protoRoot
-	if r, err := filepath.EvalSymlinks(protoRoot); err == nil {
-		expected = r
-	}
-	if !strings.Contains(strings.TrimSpace(output), strings.TrimSpace(expected)) {
-		t.Errorf("expected pwd output to contain %q, got %q", expected, output)
+	// On macOS /var is a symlink to /private/var, so pwd may report either
+	// form depending on shell PWD propagation. Compare both forms canonicalized.
+	if !pathsEquivalent(strings.TrimSpace(output), protoRoot) {
+		t.Errorf("expected pwd output to be equivalent to protoRoot %q, got %q", protoRoot, output)
 	}
 }
 
@@ -56,13 +53,25 @@ func TestExecRunnerAt_WorkDirIsExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pwd should succeed: %v", err)
 	}
-	expected := moduleRoot
-	if r, err := filepath.EvalSymlinks(moduleRoot); err == nil {
-		expected = r
+	if !pathsEquivalent(strings.TrimSpace(output), moduleRoot) {
+		t.Errorf("expected pwd output to be equivalent to moduleRoot %q, got %q", moduleRoot, output)
 	}
-	if !strings.Contains(strings.TrimSpace(output), strings.TrimSpace(expected)) {
-		t.Errorf("expected pwd output to contain moduleRoot %q, got %q", expected, output)
+}
+
+// pathsEquivalent reports whether two paths refer to the same location
+// after resolving symlinks. Either side may be in unresolved form (e.g.
+// /var/folders/...) or resolved form (/private/var/folders/...) on macOS.
+func pathsEquivalent(a, b string) bool {
+	if a == b {
+		return true
 	}
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		a = r
+	}
+	if r, err := filepath.EvalSymlinks(b); err == nil {
+		b = r
+	}
+	return a == b
 }
 
 // TestExecRunner_CollectsGeneratedFiles checks the genRoot walk picks up
