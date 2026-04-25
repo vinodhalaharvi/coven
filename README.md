@@ -1,4 +1,5 @@
 # coven — multi-agent Go package monitor
+![CI](https://github.com/vinodhalaharvi/coven/actions/workflows/ci.yml/badge.svg)
 
 A category-theoretic multi-agent system for live Go projects. Each agent
 watches a slice of the codebase and reacts independently; a blackboard
