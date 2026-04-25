@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/supervisor"
 	"github.com/vinodhalaharvi/coven/buildhealth"
 	"github.com/vinodhalaharvi/coven/codegen"
+	"github.com/vinodhalaharvi/coven/diagnostic"
 	"github.com/vinodhalaharvi/coven/ensemble"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
@@ -58,6 +60,8 @@ func main() {
 		debounce    = flag.Duration("debounce", 200*time.Millisecond, "fsnotify debounce per agent")
 		llmModel    = flag.String("llm", "", "LLM model: haiku|sonnet|opus|static (optional)")
 		reviewEvery = flag.Duration("review", 0, "minimum time between LLM reviews per package; 0 = never")
+		enableDiag  = flag.Bool("diagnose", false, "enable Claude-backed diagnostic agent (consults LLM on unhealthy facts, proposes shell commands, runs on confirm)")
+		diagAuto    = flag.Bool("diagnose-auto", false, "with -diagnose: skip y/n confirmation, run proposals automatically")
 		verbose     = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Parse()
@@ -361,6 +365,104 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// ─── Diagnostic agent (cognition layer) ────────────────────────────
+	// Subscribes to build/wire/protogen boards. On any unhealthy fact,
+	// asks Claude what's wrong + what to do, proposes a shell command,
+	// runs it on user confirmation. Without -diagnose this is dead code.
+	var diag *diagnostic.Agent
+	if *enableDiag {
+		// Build an LLM. Default to Sonnet if no model specified — Haiku works
+		// too but Sonnet is markedly better at reading errors.
+		model := *llmModel
+		if model == "" {
+			model = "sonnet"
+		}
+		diagLLM := buildLLM(model)
+		diag = diagnostic.New(diagnostic.Config{
+			ModuleRoot: absRoot,
+			LLM:        diagLLM,
+			AutoRun:    *diagAuto,
+		})
+		fmt.Printf("diagnostic agent: model=%s auto=%v\n", model, *diagAuto)
+
+		// Bootstrap check: if the module looks empty/broken at startup,
+		// kick off a diagnosis right away. This is the case the user hit
+		// where coven sat at 0/0 healthy waiting forever.
+		go func() {
+			time.Sleep(500 * time.Millisecond) // let other agents register
+			cmd := exec.CommandContext(ctx, "go", "build", "./...")
+			cmd.Dir = absRoot
+			out, err := cmd.CombinedOutput()
+			if err != nil || strings.TrimSpace(string(out)) != "" {
+				diag.Observe(ctx, diagnostic.UnhealthyFact{
+					Source:    "bootstrap",
+					Subject:   absRoot,
+					ErrorText: fmt.Sprintf("startup `go build ./...` failed:\n%s", string(out)),
+					When:      time.Now(),
+				})
+			}
+		}()
+
+		// Subscriber: BuildHealthFacts → UnhealthyFact.
+		if buildBoard != nil {
+			ch, _ := buildBoard.Subscribe(ctx, "*", 32)
+			go func() {
+				for f := range ch {
+					if f.Value.OK {
+						continue
+					}
+					var errText strings.Builder
+					if f.Value.Output != "" {
+						errText.WriteString(f.Value.Output)
+					}
+					for _, e := range f.Value.Errors {
+						fmt.Fprintf(&errText, "\n%s:%d:%d: %s", e.File, e.Line, e.Col, e.Message)
+					}
+					diag.Observe(ctx, diagnostic.UnhealthyFact{
+						Source:    "buildhealth",
+						Subject:   string(f.Value.Pkg),
+						ErrorText: errText.String(),
+						When:      f.Value.ObservedAt,
+					})
+				}
+			}()
+		}
+		// Subscriber: ProtoGenFacts.
+		if genBoard != nil {
+			ch, _ := genBoard.Subscribe(ctx, "*", 32)
+			go func() {
+				for f := range ch {
+					if f.Value.OK {
+						continue
+					}
+					diag.Observe(ctx, diagnostic.UnhealthyFact{
+						Source:    "protogen",
+						Subject:   f.Value.AgentID,
+						ErrorText: f.Value.Output,
+						When:      f.Value.GeneratedAt,
+					})
+				}
+			}()
+		}
+		// Subscriber: WireFacts.
+		if wireBoard != nil {
+			ch, _ := wireBoard.Subscribe(ctx, "*", 32)
+			go func() {
+				for f := range ch {
+					if f.Value.OK {
+						continue
+					}
+					diag.Observe(ctx, diagnostic.UnhealthyFact{
+						Source:    "wire",
+						Subject:   f.Value.PkgDir,
+						ErrorText: f.Value.Output,
+						When:      f.Value.ObservedAt,
+					})
+				}
+			}()
+		}
+	}
 
 	doneChs := []chan struct{}{}
 	startSup := func(name string, run func(context.Context) error, reports <-chan supervisor.Report, symbol string) {
