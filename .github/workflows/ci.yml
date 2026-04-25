@@ -1,0 +1,35 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: vet + test (-race)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race
+        run: go test -race -timeout 360s ./...
+
+      - name: test counts
+        run: |
+          total=0
+          for pkg in $(go list ./...); do
+            count=$(go test -list '.*' "$pkg" 2>/dev/null | grep -c '^Test' || true)
+            printf "  %-58s %3d\n" "$pkg" "$count"
+            total=$((total + count))
+          done
+          printf "\n  %-58s %3d\n" "TOTAL" "$total"

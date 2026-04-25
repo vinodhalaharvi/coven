@@ -1,0 +1,22 @@
+# Build artifacts
+/bin/
+/dist/
+
+# Go
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local env / secrets
+.env
+.env.local
+*.local.yaml
