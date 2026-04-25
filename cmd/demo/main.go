@@ -23,12 +23,17 @@ import (
 
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/algebra/supervisor"
+	"github.com/vinodhalaharvi/coven/buildhealth"
+	"github.com/vinodhalaharvi/coven/codegen"
 	"github.com/vinodhalaharvi/coven/ensemble"
+	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
 	"github.com/vinodhalaharvi/coven/ownership"
 	"github.com/vinodhalaharvi/coven/protogen"
 	"github.com/vinodhalaharvi/coven/sources"
+	"github.com/vinodhalaharvi/coven/sqlcagent"
 	"github.com/vinodhalaharvi/coven/toolagent"
+	"github.com/vinodhalaharvi/coven/wireagent"
 	"github.com/vinodhalaharvi/coven/worker"
 )
 
@@ -41,6 +46,14 @@ func main() {
 		enableLint  = flag.Bool("lint", false, "enable golangci-lint tool agent")
 		lintBin     = flag.String("lint-bin", "golangci-lint", "golangci-lint binary name/path")
 		lintSettle  = flag.Duration("lint-settle", 2*time.Second, "wait this long after package activity quiets before linting")
+		enableBuild = flag.Bool("build", false, "enable BuildHealthAgent (runs go build ./... at module root)")
+		goBin       = flag.String("go-bin", "go", "go binary name/path")
+		buildSettle = flag.Duration("build-settle", 1500*time.Millisecond, "wait this long after activity quiets before module build")
+		enableWire  = flag.Bool("wire", false, "enable WireAgent on packages containing wire.go")
+		wireBin     = flag.String("wire-bin", "wire", "wire binary name/path")
+		enableSqlc  = flag.Bool("sqlc", false, "enable SqlcAgent if sqlc.yaml is present at module root")
+		sqlcBin     = flag.String("sqlc-bin", "sqlc", "sqlc binary name/path")
+		sqlcGenRoot = flag.String("sqlc-gen-root", "", "directory containing sqlc-generated code (required if -sqlc)")
 		tick        = flag.Duration("tick", 500*time.Millisecond, "ensemble polling interval")
 		debounce    = flag.Duration("debounce", 200*time.Millisecond, "fsnotify debounce per agent")
 		llmModel    = flag.String("llm", "", "LLM model: haiku|sonnet|opus|static (optional)")
@@ -204,6 +217,121 @@ func main() {
 		fmt.Printf("lint agent: golangci-lint on settle=%s\n", *lintSettle)
 	}
 
+	// ─── Centralized fsnotify + new codegen agents ───────────────────────
+	// fsBoard is the central FileChangeFact stream consumed by:
+	//   - BuildHealthAgent (module-wide go build ./...)
+	//   - WireAgent(s)     (per-package wire regeneration)
+	//   - SqlcAgent        (sqlc generate when .sql files change)
+	//
+	// Every existing legacy agent (PackageAgent, ProtoGenAgent) keeps its
+	// own fsnotify for now — those continue to work as before. The new
+	// agents are additive.
+	var fsBoard *blackboard.Board[fsmonitor.FileChangeFact]
+	if *enableBuild || *enableWire || *enableSqlc {
+		fsBoard = blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{
+			QuietFor: 1 * time.Second, Rounds: 3,
+		})
+		// One central watcher for the entire module.
+		go func() {
+			err := fsmonitor.Run(context.Background(), fsmonitor.Config{
+				Root:     absRoot,
+				Debounce: *debounce,
+				Board:    fsBoard,
+			})
+			if err != nil {
+				log.Error("fsmonitor exited", "err", err)
+			}
+		}()
+		fmt.Printf("\nfsmonitor: watching %s (central FileChangeFact stream)\n", absRoot)
+	}
+
+	// BuildHealthAgent — module-level go build ./...
+	var buildSup *supervisor.Supervisor[buildhealth.Trigger, []buildhealth.BuildHealthFact]
+	var buildBoard *blackboard.Board[buildhealth.BuildHealthFact]
+	if *enableBuild {
+		buildBoard = blackboard.New[buildhealth.BuildHealthFact](blackboard.Config{
+			QuietFor: 1 * time.Second, Rounds: 3,
+		})
+		buildSup = supervisor.New[buildhealth.Trigger, []buildhealth.BuildHealthFact](supervisor.Config{
+			Name: "build-sup", Logger: log,
+		})
+		buildSup.Attach(buildhealth.BuildReactiveWorker(buildhealth.Config{
+			AgentID:    "buildhealth",
+			ModuleRoot: absRoot,
+			GoBin:      *goBin,
+			Packages:   pkgDirs,
+			FSBoard:    fsBoard,
+			BuildBoard: buildBoard,
+			SettleFor:  *buildSettle,
+		}))
+		fmt.Printf("build agent: go build ./... settle=%s\n", *buildSettle)
+	}
+
+	// WireAgent(s) — one per package containing wire.go.
+	var wireSup *supervisor.Supervisor[codegen.Trigger, wireagent.Fact]
+	var wireBoard *blackboard.Board[wireagent.Fact]
+	if *enableWire {
+		wirePkgs, _ := wireagent.DiscoverWirePackages(absRoot)
+		if len(wirePkgs) == 0 {
+			fmt.Printf("wire agent: no wire-tagged packages found under %s\n", absRoot)
+		} else {
+			wireBoard = blackboard.New[wireagent.Fact](blackboard.Config{
+				QuietFor: 1 * time.Second, Rounds: 3,
+			})
+			wireSup = supervisor.New[codegen.Trigger, wireagent.Fact](supervisor.Config{
+				Name: "wire-sup", Logger: log,
+			})
+			for _, pkg := range wirePkgs {
+				wireSup.Attach(wireagent.BuildReactiveWorker(
+					"wire:"+pkg,
+					wireagent.Cfg{
+						PkgDir:     pkg,
+						ModuleRoot: absRoot,
+						WireBin:    *wireBin,
+					},
+					fsBoard, wireBoard, reg,
+				))
+			}
+			fmt.Printf("wire agent: %d package(s) under %s\n", len(wirePkgs), absRoot)
+			for _, p := range wirePkgs {
+				rel, _ := filepath.Rel(absRoot, p)
+				fmt.Printf("  • %s\n", rel)
+			}
+		}
+	}
+
+	// SqlcAgent — single agent for the module.
+	var sqlcSup *supervisor.Supervisor[codegen.Trigger, sqlcagent.Fact]
+	var sqlcBoard *blackboard.Board[sqlcagent.Fact]
+	if *enableSqlc {
+		if !sqlcagent.HasSqlcConfig(absRoot) {
+			fmt.Printf("sqlc agent: no sqlc.yaml/yml/json at %s; skipping\n", absRoot)
+		} else if *sqlcGenRoot == "" {
+			fmt.Printf("sqlc agent: -sqlc-gen-root required; skipping\n")
+		} else {
+			sqlcAbsGen, _ := filepath.Abs(*sqlcGenRoot)
+			if r, err := filepath.EvalSymlinks(sqlcAbsGen); err == nil {
+				sqlcAbsGen = r
+			}
+			sqlcBoard = blackboard.New[sqlcagent.Fact](blackboard.Config{
+				QuietFor: 1 * time.Second, Rounds: 3,
+			})
+			sqlcSup = supervisor.New[codegen.Trigger, sqlcagent.Fact](supervisor.Config{
+				Name: "sqlc-sup", Logger: log,
+			})
+			sqlcSup.Attach(sqlcagent.BuildReactiveWorker(
+				"sqlc",
+				sqlcagent.Cfg{
+					ModuleRoot: absRoot,
+					GenRoot:    sqlcAbsGen,
+					SqlcBin:    *sqlcBin,
+				},
+				fsBoard, sqlcBoard, reg,
+			))
+			fmt.Printf("sqlc agent: gen-root=%s\n", sqlcAbsGen)
+		}
+	}
+
 	ens := ensemble.New(ensemble.Config{Tick: *tick, Convergence: ensemble.All()})
 	ensemble.AttachSupervisor(ens, "pkg", pkgSup)
 	ensemble.AttachBlackboard(ens, "pkg-board", pkgBoard)
@@ -214,6 +342,21 @@ func main() {
 	if lintSup != nil {
 		ensemble.AttachSupervisor(ens, "lint", lintSup)
 		ensemble.AttachBlackboard(ens, "lint-board", toolBoard)
+	}
+	if buildSup != nil {
+		ensemble.AttachSupervisor(ens, "build", buildSup)
+		ensemble.AttachBlackboard(ens, "build-board", buildBoard)
+	}
+	if wireSup != nil {
+		ensemble.AttachSupervisor(ens, "wire", wireSup)
+		ensemble.AttachBlackboard(ens, "wire-board", wireBoard)
+	}
+	if sqlcSup != nil {
+		ensemble.AttachSupervisor(ens, "sqlc", sqlcSup)
+		ensemble.AttachBlackboard(ens, "sqlc-board", sqlcBoard)
+	}
+	if fsBoard != nil {
+		ensemble.AttachBlackboard(ens, "fs-board", fsBoard)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -241,6 +384,15 @@ func main() {
 	}
 	if lintSup != nil {
 		startSup("lint", lintSup.Run, lintSup.Reports(), "🔍")
+	}
+	if buildSup != nil {
+		startSup("build", buildSup.Run, buildSup.Reports(), "🔨")
+	}
+	if wireSup != nil {
+		startSup("wire", wireSup.Run, wireSup.Reports(), "🪡")
+	}
+	if sqlcSup != nil {
+		startSup("sqlc", sqlcSup.Run, sqlcSup.Reports(), "🗄")
 	}
 
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")
