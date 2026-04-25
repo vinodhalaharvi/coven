@@ -42,10 +42,33 @@ func FailingRunner(msg string) Runner {
 // Note: this Runner reads outputs from disk after the command completes,
 // because buf doesn't tell us which files it wrote. The DiffWriter will
 // still skip writes for unchanged content, so the cascade is suppressed.
+//
+// If buf.yaml / buf.gen.yaml live somewhere other than the proto root
+// (commonly at the module root), use ExecRunnerAt instead.
 func ExecRunner(bin string, args []string, genRoot string) Runner {
+	return execRunnerImpl(bin, args, "", genRoot)
+}
+
+// ExecRunnerAt is like ExecRunner but runs the command in workDir instead
+// of the proto root. Use this when buf.yaml / buf.gen.yaml live at the
+// module root rather than alongside the protos.
+//
+// Example:
+//   runner := ExecRunnerAt("buf", []string{"generate"}, moduleRoot, genRoot)
+func ExecRunnerAt(bin string, args []string, workDir, genRoot string) Runner {
+	return execRunnerImpl(bin, args, workDir, genRoot)
+}
+
+func execRunnerImpl(bin string, args []string, workDir, genRoot string) Runner {
 	return func(ctx context.Context, protoRoot, _ string) ([]GeneratedFile, string, error) {
 		cmd := exec.CommandContext(ctx, bin, args...)
-		cmd.Dir = protoRoot
+		// If workDir is set, prefer it. Otherwise default to protoRoot
+		// (matches the original ExecRunner behavior).
+		if workDir != "" {
+			cmd.Dir = workDir
+		} else {
+			cmd.Dir = protoRoot
+		}
 		out, err := cmd.CombinedOutput()
 		output := string(out)
 		if err != nil {

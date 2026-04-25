@@ -127,6 +127,7 @@ func BuildReactiveWorker(cfg Config) supervisor.ReactiveWorker[worker.FSEvent, P
 		Dir:        cfg.ProtoRoot,
 		Debounce:   cfg.Debounce,
 		Extensions: cfg.Extensions,
+		Recursive:  true, // proto trees are conventionally nested (e.g. proto/svc/v1/...)
 	})
 	return supervisor.ReactiveWorker[worker.FSEvent, ProtoGenFact]{
 		ID:     cfg.AgentID,

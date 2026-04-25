@@ -325,6 +325,137 @@ func TestFSSource_IgnoreFileHook(t *testing.T) {
 	}
 }
 
+func TestFSSource_Recursive_WatchesNestedSubdirs(t *testing.T) {
+	root := t.TempDir()
+	deep := filepath.Join(root, "user", "v1")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Pre-create a file so the directory definitely exists when the watcher attaches.
+	if err := os.WriteFile(filepath.Join(deep, "user.proto"), []byte("syntax = \"proto3\";\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	src := FSSource(FSConfig{
+		Dir:        root,
+		Debounce:   80 * time.Millisecond,
+		Extensions: []string{".proto"},
+		Recursive:  true,
+	})
+	ch, err := src(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit a file two levels deep — without Recursive, this would not fire.
+	time.Sleep(80 * time.Millisecond) // let watcher settle
+	if err := os.WriteFile(filepath.Join(deep, "user.proto"), []byte("syntax = \"proto3\";\n// edit\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-ch:
+		if len(ev.ChangedFiles) == 0 {
+			t.Fatal("event arrived but ChangedFiles is empty")
+		}
+		// Confirm the changed file is the nested one.
+		matched := false
+		for _, p := range ev.ChangedFiles {
+			if strings.HasSuffix(p, "user.proto") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("expected user.proto in ChangedFiles, got %v", ev.ChangedFiles)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no event for nested-dir edit under Recursive=true")
+	}
+}
+
+func TestFSSource_Recursive_PicksUpNewSubdirs(t *testing.T) {
+	root := t.TempDir()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+
+	src := FSSource(FSConfig{
+		Dir:        root,
+		Debounce:   80 * time.Millisecond,
+		Extensions: []string{".proto"},
+		Recursive:  true,
+	})
+	ch, err := src(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond) // let watcher settle
+
+	// Create a NEW subdir, then a file inside it. The recursive watcher
+	// must dynamically pick up the new subdir.
+	newDir := filepath.Join(root, "newpkg", "v2")
+	if err := os.MkdirAll(newDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Give debouncer time to register the new dir before writing the file.
+	time.Sleep(150 * time.Millisecond)
+	if err := os.WriteFile(filepath.Join(newDir, "x.proto"), []byte("syntax = \"proto3\";\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case ev := <-ch:
+			for _, p := range ev.ChangedFiles {
+				if strings.HasSuffix(p, "x.proto") {
+					return // success
+				}
+			}
+		case <-deadline:
+			t.Fatal("never saw event for file in dynamically-created subdir")
+		}
+	}
+}
+
+func TestFSSource_NonRecursive_IgnoresNestedSubdirs(t *testing.T) {
+	root := t.TempDir()
+	deep := filepath.Join(root, "user", "v1")
+	if err := os.MkdirAll(deep, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+
+	src := FSSource(FSConfig{
+		Dir:        root,
+		Debounce:   60 * time.Millisecond,
+		Extensions: []string{".proto"},
+		// Recursive: false (default)
+	})
+	ch, err := src(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	if err := os.WriteFile(filepath.Join(deep, "x.proto"), []byte("syntax=\"proto3\";\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case ev := <-ch:
+		t.Fatalf("non-recursive watcher unexpectedly fired for nested file: %+v", ev)
+	case <-time.After(500 * time.Millisecond):
+		// Good — confirms backward-compat with non-recursive default.
+	}
+}
+
 func TestAgentProgram_Structure(t *testing.T) {
 	// Verify the agent's Program has the expected static shape via analyzer.
 	dir := mustTempModule(t, "package x\nfunc Foo() int { return 1 }\n")

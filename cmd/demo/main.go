@@ -62,19 +62,33 @@ func main() {
 		log.Error("resolving root", "err", err)
 		os.Exit(1)
 	}
+	// Resolve symlinks so that what we pass to the watchers matches what
+	// fsnotify reports back. macOS in particular: /tmp is a symlink to
+	// /private/tmp, and kqueue events arrive with the canonical path.
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		absRoot = resolved
+	}
 	if *protoRoot != "" && *genRoot == "" {
 		log.Error("-proto-root requires -gen-root")
 		os.Exit(1)
 	}
 
 	pkgs, err := discoverPackages(absRoot)
-	if err != nil || len(pkgs) == 0 {
-		log.Error("discovering packages", "err", err)
+	if err != nil {
+		log.Error("walking root", "err", err)
 		os.Exit(1)
 	}
-	fmt.Printf("discovered %d package(s) under %s:\n", len(pkgs), absRoot)
-	for _, p := range pkgs {
-		fmt.Printf("  • %s  (%s)\n", p.importPath, p.dir)
+	if len(pkgs) == 0 && *protoRoot == "" {
+		log.Error("no Go packages found and no -proto-root given; nothing to do", "root", absRoot)
+		os.Exit(1)
+	}
+	if len(pkgs) == 0 {
+		fmt.Printf("no Go packages found under %s yet (will need to be present at startup; restart coven once buf generate has produced output)\n", absRoot)
+	} else {
+		fmt.Printf("discovered %d package(s) under %s:\n", len(pkgs), absRoot)
+		for _, p := range pkgs {
+			fmt.Printf("  • %s  (%s)\n", p.importPath, p.dir)
+		}
 	}
 
 	var l llm.LLM
@@ -147,7 +161,13 @@ func main() {
 	var genSup *supervisor.Supervisor[worker.FSEvent, protogen.ProtoGenFact]
 	if genBoard != nil {
 		absProto, _ := filepath.Abs(*protoRoot)
+		if r, err := filepath.EvalSymlinks(absProto); err == nil {
+			absProto = r
+		}
 		absGen, _ := filepath.Abs(*genRoot)
+		if r, err := filepath.EvalSymlinks(absGen); err == nil {
+			absGen = r
+		}
 		genSup = supervisor.New[worker.FSEvent, protogen.ProtoGenFact](supervisor.Config{
 			Name: "gen-sup", Logger: log,
 		})
@@ -157,10 +177,13 @@ func main() {
 			GenRoot:   absGen,
 			Board:     genBoard,
 			Ownership: reg,
-			Runner:    protogen.ExecRunner(*bufBin, []string{"generate"}, absGen),
-			Debounce:  *debounce,
+			// Run buf at the module root so it discovers buf.yaml /
+			// buf.gen.yaml there. Outputs still go under absGen.
+			Runner:   protogen.ExecRunnerAt(*bufBin, []string{"generate"}, absRoot, absGen),
+			Debounce: *debounce,
 		}))
-		fmt.Printf("\nproto agent: watching %s, generating into %s (via %s)\n", absProto, absGen, *bufBin)
+		fmt.Printf("\nproto agent: watching %s, generating into %s (via %s, run from %s)\n",
+			absProto, absGen, *bufBin, absRoot)
 	}
 
 	var lintSup *supervisor.Supervisor[toolagent.Trigger, []toolagent.ToolFact]

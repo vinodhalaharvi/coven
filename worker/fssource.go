@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,18 +24,36 @@ type FSEvent struct {
 
 // FSConfig configures FSSource.
 type FSConfig struct {
-	Dir        string        // directory to watch (non-recursive)
-	Debounce   time.Duration // quiet period before emitting; default 200ms
-	Extensions []string      // file extensions to consider, e.g. [".go"]; nil = all
+	Dir        string                    // directory to watch
+	Debounce   time.Duration             // quiet period before emitting; default 200ms
+	Extensions []string                  // file extensions to consider, e.g. [".go"]; nil = all
 	IgnoreFile func(absPath string) bool // optional: return true to ignore an event for this path
+	Recursive  bool                      // if true, watch all subdirectories (and new ones as they're created)
 }
 
-// FSSource returns a source function suitable for ReactiveWorker.Source. It
-// watches exactly cfg.Dir (non-recursive — each agent is scoped to one
-// directory) and emits a debounced FSEvent per burst of relevant changes.
+// FSSource returns a source function suitable for ReactiveWorker.Source.
+//
+// By default it watches only cfg.Dir (non-recursive — each agent scoped to
+// one directory, which is the right default for Go package agents).
+//
+// When cfg.Recursive is true, FSSource walks the tree at startup and adds
+// every subdirectory, then watches for newly-created subdirectories at
+// runtime and adds them too. This is required for nested layouts like
+// proto trees where source files live in subdirectories of the agent's
+// configured root.
+//
+// On macOS, fsnotify uses kqueue, which only delivers events for paths
+// that have been explicitly Add()'d. cfg.Dir is also resolved through
+// EvalSymlinks so that events delivered with the canonical path (e.g.
+// /private/tmp/... on macOS where /tmp is a symlink) match the watcher's
+// internal bookkeeping.
 func FSSource(cfg FSConfig) func(ctx context.Context) (<-chan FSEvent, error) {
 	if cfg.Debounce <= 0 {
 		cfg.Debounce = 200 * time.Millisecond
+	}
+	// Resolve symlinks so the watcher's path matches what fsnotify reports.
+	if resolved, err := filepath.EvalSymlinks(cfg.Dir); err == nil {
+		cfg.Dir = resolved
 	}
 	// Normalize extensions for case-insensitive comparison and ensure leading dot.
 	exts := make([]string, 0, len(cfg.Extensions))
@@ -55,11 +74,32 @@ func FSSource(cfg FSConfig) func(ctx context.Context) (<-chan FSEvent, error) {
 			watcher.Close()
 			return nil, err
 		}
+		if cfg.Recursive {
+			if err := addRecursive(watcher, cfg.Dir); err != nil {
+				watcher.Close()
+				return nil, err
+			}
+		}
 
 		out := make(chan FSEvent, 4)
-		go debounceLoop(ctx, cfg.Dir, watcher, out, cfg.Debounce, exts, cfg.IgnoreFile)
+		go debounceLoop(ctx, cfg.Dir, watcher, out, cfg.Debounce, exts, cfg.IgnoreFile, cfg.Recursive)
 		return out, nil
 	}
+}
+
+// addRecursive walks root and adds every subdirectory to watcher. Best-effort:
+// errors on individual subdirs (e.g. permission denied) are skipped, not fatal.
+func addRecursive(w *fsnotify.Watcher, root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable nodes; they'll just be invisible to events
+		}
+		if !info.IsDir() || path == root {
+			return nil
+		}
+		_ = w.Add(path) // best-effort
+		return nil
+	})
 }
 
 // FSSourceLegacy is a backward-compatible shim used by the existing
@@ -80,6 +120,7 @@ func debounceLoop(
 	debounce time.Duration,
 	exts []string,
 	ignore func(string) bool,
+	recursive bool,
 ) {
 	defer watcher.Close()
 	defer close(out)
@@ -133,6 +174,15 @@ func debounceLoop(
 			if !ok {
 				flush()
 				return
+			}
+			// If a new directory appeared and we're recursive, watch it. Do
+			// this BEFORE the relevance filter — directory creation isn't a
+			// relevant content event, but it IS something we need to watch.
+			if recursive && ev.Op&fsnotify.Create != 0 {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+					_ = watcher.Add(ev.Name)
+					_ = addRecursive(watcher, ev.Name)
+				}
 			}
 			if !isRelevantEvent(ev, exts) {
 				continue
