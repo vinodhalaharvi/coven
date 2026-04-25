@@ -8,3 +8,5 @@ type Token string
 func Validate(t Token) bool {
 	return t != ""
 }
+
+// hello
