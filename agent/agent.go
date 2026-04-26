@@ -112,11 +112,20 @@ func (a *Agent) Wake(ctx context.Context, observation string) (string, error) {
 		// Always append the assistant message to history (even if it has tool_use).
 		a.conversation = append(a.conversation, msg)
 
+		// If the assistant included any text alongside tool calls, surface it
+		// to the user — this is how Claude narrates its plan ("let me check
+		// the buf config first") and waiting agents shouldn't look hung.
+		if midText := extractText(msg); midText != "" && stop == llm.StopToolUse {
+			a.cfg.Print(fmt.Sprintf("  [%s] %s\n", a.cfg.ID, midText))
+		}
+
 		if stop != llm.StopToolUse {
 			// Final response. Print any text and return.
 			final := extractText(msg)
 			if final != "" {
 				a.cfg.Print(fmt.Sprintf("  [%s] %s\n", a.cfg.ID, final))
+			} else {
+				a.cfg.Print(fmt.Sprintf("  [%s] (no final message; stop_reason=%s)\n", a.cfg.ID, stop))
 			}
 			return final, nil
 		}
@@ -168,7 +177,7 @@ func (a *Agent) runTool(ctx context.Context, use *llm.ToolUseBlock) (string, boo
 	// Surface what we're doing for pure tools too — keeps the user
 	// informed without prompting.
 	if tool.Pure {
-		a.cfg.Print(fmt.Sprintf("  [%s] tool: %s %s\n", a.cfg.ID, use.Name, summarizeToolCall(use)))
+		a.cfg.Print(fmt.Sprintf("  [%s] tool: %s\n", a.cfg.ID, summarizeToolCall(use)))
 	}
 
 	out, err := tool.Run(ctx, use.Input)
