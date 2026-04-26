@@ -652,9 +652,28 @@ func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 		}
 		stdinMu.Lock()
 		defer stdinMu.Unlock()
-		fmt.Printf("\n  [confirm] %s\n  run? [y/N] ", summary)
+
+		// Brief pause so the narration above settles before the prompt.
+		// Without this, fast Claude responses make the prompt land
+		// before the user's eyes have caught up to the prior output.
+		time.Sleep(150 * time.Millisecond)
+
+		// Bright, unmissable separator. Two blank lines top, one bottom.
+		const bar = "═══════════════════════════════════════════════════════════════"
+		fmt.Print("\n\n")
+		fmt.Printf("  %s\n", bar)
+		fmt.Printf("  >>> CONFIRM: %s\n", summary)
+		fmt.Printf("  %s\n", bar)
+		fmt.Print("  run? [y/N] ")
+
 		line, _ := stdinReader.ReadString('\n')
 		line = strings.TrimSpace(strings.ToLower(line))
-		return line == "y" || line == "yes"
+		ok := line == "y" || line == "yes"
+		if ok {
+			fmt.Printf("  → approved\n\n")
+		} else {
+			fmt.Printf("  → declined\n\n")
+		}
+		return ok
 	}
 }
