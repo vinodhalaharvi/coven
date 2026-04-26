@@ -229,10 +229,66 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 }
 
-// runAgent runs an agent's Run loop and logs unexpected exits.
+// runAgent runs an agent's Run loop with exponential-backoff retry on
+// failure. The most common failure mode in practice is a transient
+// Claude API hiccup (rate limit, brief network outage); without retry
+// the agent silently dies and stays dead until coven restarts.
+//
+// Retry policy:
+//   - First retry after 1s, then 2s, 4s, 8s, capped at 30s.
+//   - Backoff resets to 1s if the agent ran for ≥60s before failing
+//     (i.e. the failure is transient, not a tight loop).
+//   - No max-retries cap. The user can Ctrl-C if they want to stop.
+//   - ctx cancellation always wins; we never retry past a cancelled ctx.
+//
+// We deliberately don't classify failures (network vs. config vs. bug).
+// Repeated identical failures become visible in the log and the user
+// decides; classifying inside the helper would be too clever.
 func runAgent(ctx context.Context, log *slog.Logger, name string, run func(context.Context) error) {
-	if err := run(ctx); err != nil && ctx.Err() == nil {
-		log.Error(name+" exited unexpectedly", "err", err)
+	const (
+		baseBackoff  = 1 * time.Second
+		maxBackoff   = 30 * time.Second
+		resetAfter   = 60 * time.Second // long-enough run resets backoff
+	)
+	backoff := baseBackoff
+
+	for {
+		started := time.Now()
+		err := run(ctx)
+
+		// Context cancelled (Ctrl-C, signal): exit cleanly, no retry.
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			// Run returned nil without ctx cancellation. This is unusual
+			// for a steady-state agent — it implies the agent decided
+			// it's done. Don't restart; respect that.
+			return
+		}
+
+		// Reset backoff if the agent ran for a while before failing.
+		if time.Since(started) >= resetAfter {
+			backoff = baseBackoff
+		}
+
+		log.Warn(name+" failed; restarting after backoff",
+			"err", err,
+			"backoff", backoff,
+			"ran_for", time.Since(started).Round(time.Millisecond))
+
+		// Sleep, but interruptible by ctx cancellation.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		// Exponential growth, capped.
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
 	}
 }
 
