@@ -12,6 +12,7 @@ import (
 
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 const Role = `You are the makefile-bootstrap agent. Your job is to propose a starter Makefile for a Go project so the user can type 'make' and have something useful happen. Batteries-included — the canonical targets most Go projects have.
@@ -88,3 +89,24 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) HistoryLen() int { return a.inner.HistoryLen() }
+
+// init registers this agent. Always relevant — every Go project can
+// benefit from a starter Makefile.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "make",
+		Description: "starter Makefile with canonical Go targets",
+		Detect: func(goMod string, moduleRoot string) bool {
+			return goMod != ""
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "makefile-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+			})
+		},
+	})
+}

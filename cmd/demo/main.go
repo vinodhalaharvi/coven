@@ -34,10 +34,12 @@ import (
 	"github.com/vinodhalaharvi/coven/buildhealth"
 	"github.com/vinodhalaharvi/coven/dockeragent"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
+	"github.com/vinodhalaharvi/coven/ginagent"
 	"github.com/vinodhalaharvi/coven/llm"
 	"github.com/vinodhalaharvi/coven/mainbuilder"
 	"github.com/vinodhalaharvi/coven/makefileagent"
 	"github.com/vinodhalaharvi/coven/protoagent"
+	"github.com/vinodhalaharvi/coven/registry"
 	"github.com/vinodhalaharvi/coven/sqlcagent"
 	"github.com/vinodhalaharvi/coven/wireagent"
 )
@@ -54,6 +56,8 @@ func main() {
 		bootstrap     = flag.Bool("bootstrap", false, "wake-once: propose starter main.go file(s) for missing entry points, then go dormant")
 		bootstrapDock = flag.Bool("bootstrap-docker", false, "wake-once: propose Dockerfile + docker-compose.yaml + .dockerignore")
 		bootstrapMake = flag.Bool("bootstrap-make", false, "wake-once: propose a starter Makefile with canonical Go-project targets")
+		bootstrapGin  = flag.Bool("bootstrap-gin", false, "steady-state: keep gin handlers in sync with sqlc data layer")
+		bootstrapAuto = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
 		convAuto      = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
 	)
@@ -65,8 +69,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake {
-		log.Error("no agents enabled. Try -conv-proto, -conv-wire, -conv-sqlc, -conv-build, -bootstrap, -bootstrap-docker, or -bootstrap-make")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapAuto {
+		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap, -bootstrap-gin")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -174,6 +178,46 @@ func main() {
 		})
 		go runAgent(ctx, log, "makefile-agent", ma.Run)
 		fmt.Printf("bootstrap makefile-agent: model=%s auto=%v (wakes once at startup)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapGin {
+		ga := ginagent.New(ginagent.Config{
+			ID: "gin-agent", ModuleRoot: absRoot,
+			Sender: sender, FSBoard: fsBoard,
+			Confirm: confirm, Print: printf,
+			Settle: 2 * time.Second,
+		})
+		go runAgent(ctx, log, "gin-agent", ga.Run)
+		fmt.Printf("conv gin-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapAuto {
+		// Generic dispatch: read go.mod, ask the registry which agents
+		// apply, instantiate each. This is the path that scales — adding
+		// a new agent (gqlgen, oapi-codegen, mockgen, etc.) requires only
+		// registering it in its package's init(); no cmd/demo edit needed.
+		goModPath := filepath.Join(absRoot, "go.mod")
+		goModBytes, err := os.ReadFile(goModPath)
+		if err != nil {
+			log.Error("bootstrap-auto: cannot read go.mod", "path", goModPath, "err", err)
+		} else {
+			goMod := string(goModBytes)
+			matched := registry.Detect(goMod, absRoot)
+			deps := registry.BuildDeps{
+				ModuleRoot: absRoot,
+				Sender:     sender,
+				Confirm:    confirm,
+				Print:      printf,
+				FSBoard:    fsBoard,
+			}
+			fmt.Printf("\nbootstrap-auto: %d agent(s) detected from go.mod\n", len(matched))
+			for _, spec := range matched {
+				agentRunner := spec.Build(deps)
+				fmt.Printf("  • %s — %s\n", spec.Name, spec.Description)
+				name := spec.Name
+				go runAgent(ctx, log, name+"-agent", agentRunner.Run)
+			}
+		}
 	}
 
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")

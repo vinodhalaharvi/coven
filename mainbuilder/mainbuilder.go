@@ -18,6 +18,7 @@ import (
 
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 // Role is the system prompt that primes Claude on the bootstrap job.
@@ -113,3 +114,27 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // HistoryLen exposes inner conversation length for tests.
 func (a *Agent) HistoryLen() int { return a.inner.HistoryLen() }
+
+// init registers this agent with the central registry. Always relevant —
+// every Go project benefits from having a runnable main.go scaffold if
+// it doesn't already.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "main",
+		Description: "starter main.go for missing entry points",
+		Detect: func(goMod string, moduleRoot string) bool {
+			// mainbuilder always applies — it'll abstain if a working
+			// main already exists (per its role string).
+			return goMod != ""
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "main-builder",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+			})
+		},
+	})
+}

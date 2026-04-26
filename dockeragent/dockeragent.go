@@ -16,6 +16,7 @@ import (
 
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 const Role = `You are the docker-bootstrap agent. Your job is to propose Docker scaffolding (Dockerfile, docker-compose.yaml, .dockerignore) for a Go project so the user can 'docker compose up' and run the application.
@@ -88,3 +89,27 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) HistoryLen() int { return a.inner.HistoryLen() }
+
+// init registers this agent. Detector: if any cmd/*/ exists, the
+// project plausibly wants a Dockerfile. (Library projects without
+// runnable binaries get filtered by the agent's role string.)
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "docker",
+		Description: "Dockerfile + docker-compose scaffolding",
+		Detect: func(goMod string, moduleRoot string) bool {
+			// Conservative: always applicable. The role string handles
+			// "no cmd/*/, abstain" decisions.
+			return goMod != ""
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "docker-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+			})
+		},
+	})
+}
