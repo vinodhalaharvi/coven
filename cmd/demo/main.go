@@ -55,8 +55,7 @@ func main() {
 		enableBuild = flag.Bool("build", false, "enable BuildHealthAgent (runs go build ./... at module root)")
 		goBin       = flag.String("go-bin", "go", "go binary name/path")
 		buildSettle = flag.Duration("build-settle", 1500*time.Millisecond, "wait this long after activity quiets before module build")
-		enableWire  = flag.Bool("wire", false, "enable WireAgent on packages containing wire.go")
-		wireBin     = flag.String("wire-bin", "wire", "wire binary name/path")
+		enableWire  = flag.Bool("conv-wire", false, "enable conversational wire-agent (Claude-driven, replaces reflex wireagent)")
 		enableSqlc  = flag.Bool("sqlc", false, "enable SqlcAgent if sqlc.yaml is present at module root")
 		sqlcBin     = flag.String("sqlc-bin", "sqlc", "sqlc binary name/path")
 		sqlcGenRoot = flag.String("sqlc-gen-root", "", "directory containing sqlc-generated code (required if -sqlc)")
@@ -101,7 +100,7 @@ func main() {
 		log.Error("walking root", "err", err)
 		os.Exit(1)
 	}
-	if len(pkgs) == 0 && *protoRoot == "" && !*convProto {
+	if len(pkgs) == 0 && *protoRoot == "" && !*convProto && !*enableWire {
 		log.Error("no Go packages found, no -proto-root given, and no conversational agent enabled; nothing to do", "root", absRoot)
 		os.Exit(1)
 	}
@@ -277,38 +276,8 @@ func main() {
 		fmt.Printf("build agent: go build ./... settle=%s\n", *buildSettle)
 	}
 
-	// WireAgent(s) — one per package containing wire.go.
-	var wireSup *supervisor.Supervisor[codegen.Trigger, wireagent.Fact]
-	var wireBoard *blackboard.Board[wireagent.Fact]
-	if *enableWire {
-		wirePkgs, _ := wireagent.DiscoverWirePackages(absRoot)
-		if len(wirePkgs) == 0 {
-			fmt.Printf("wire agent: no wire-tagged packages found under %s\n", absRoot)
-		} else {
-			wireBoard = blackboard.New[wireagent.Fact](blackboard.Config{
-				QuietFor: 1 * time.Second, Rounds: 3,
-			})
-			wireSup = supervisor.New[codegen.Trigger, wireagent.Fact](supervisor.Config{
-				Name: "wire-sup", Logger: log,
-			})
-			for _, pkg := range wirePkgs {
-				wireSup.Attach(wireagent.BuildReactiveWorker(
-					"wire:"+pkg,
-					wireagent.Cfg{
-						PkgDir:     pkg,
-						ModuleRoot: absRoot,
-						WireBin:    *wireBin,
-					},
-					fsBoard, wireBoard, reg,
-				))
-			}
-			fmt.Printf("wire agent: %d package(s) under %s\n", len(wirePkgs), absRoot)
-			for _, p := range wirePkgs {
-				rel, _ := filepath.Rel(absRoot, p)
-				fmt.Printf("  • %s\n", rel)
-			}
-		}
-	}
+	// (Reflex WireAgent removed — see -conv-wire flag below for the
+	// conversational replacement.)
 
 	// SqlcAgent — single agent for the module.
 	var sqlcSup *supervisor.Supervisor[codegen.Trigger, sqlcagent.Fact]
@@ -356,10 +325,6 @@ func main() {
 	if buildSup != nil {
 		ensemble.AttachSupervisor(ens, "build", buildSup)
 		ensemble.AttachBlackboard(ens, "build-board", buildBoard)
-	}
-	if wireSup != nil {
-		ensemble.AttachSupervisor(ens, "wire", wireSup)
-		ensemble.AttachBlackboard(ens, "wire-board", wireBoard)
 	}
 	if sqlcSup != nil {
 		ensemble.AttachSupervisor(ens, "sqlc", sqlcSup)
@@ -451,23 +416,6 @@ func main() {
 				}
 			}()
 		}
-		// Subscriber: WireFacts.
-		if wireBoard != nil {
-			ch, _ := wireBoard.Subscribe(ctx, "*", 32)
-			go func() {
-				for f := range ch {
-					if f.Value.OK {
-						continue
-					}
-					diag.Observe(ctx, diagnostic.UnhealthyFact{
-						Source:    "wire",
-						Subject:   f.Value.PkgDir,
-						ErrorText: f.Value.Output,
-						When:      f.Value.ObservedAt,
-					})
-				}
-			}()
-		}
 	}
 
 	doneChs := []chan struct{}{}
@@ -496,20 +444,17 @@ func main() {
 	if buildSup != nil {
 		startSup("build", buildSup.Run, buildSup.Reports(), "🔨")
 	}
-	if wireSup != nil {
-		startSup("wire", wireSup.Run, wireSup.Reports(), "🪡")
-	}
 	if sqlcSup != nil {
 		startSup("sqlc", sqlcSup.Run, sqlcSup.Reports(), "🗄")
 	}
 
-	// ─── Conversational proto-agent (slice 1) ───────────────────────
-	// When -conv-proto is set, attach a Claude-backed agent that replaces
-	// the reflex protogen behavior. It survives alongside reflex agents
-	// for now so they can be compared side by side.
-	if *convProto {
+	// ─── Conversational agents (slice 2) ───────────────────────────────
+	// When any -conv-* flag is set, we need a shared central fsmonitor
+	// (so multiple agents subscribe to the same FileChangeFact stream)
+	// and a shared LLM sender + confirm helper.
+	convEnabled := *convProto || *enableWire
+	if convEnabled {
 		if fsBoard == nil {
-			// Conv-proto needs the central fsmonitor too.
 			fsBoard = blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{
 				QuietFor: 1 * time.Second, Rounds: 3,
 			})
@@ -538,23 +483,43 @@ func main() {
 		default:
 			sender = llm.ClaudeConversation(llm.ClaudeConfig{Model: llm.ClaudeSonnet})
 		}
-
 		confirm := makeStdinConfirm(*convAuto)
-		pa := protoagent.New(protoagent.Config{
-			ID:         "proto-agent",
-			ModuleRoot: absRoot,
-			Sender:     sender,
-			FSBoard:    fsBoard,
-			Confirm:    confirm,
-			Print:      func(s string) { fmt.Print(s) },
-			Settle:     1 * time.Second,
-		})
-		go func() {
-			if err := pa.Run(ctx); err != nil {
-				log.Error("proto-agent exited", "err", err)
-			}
-		}()
-		fmt.Printf("conv proto-agent: model=%s auto=%v\n", model, *convAuto)
+
+		if *convProto {
+			pa := protoagent.New(protoagent.Config{
+				ID:         "proto-agent",
+				ModuleRoot: absRoot,
+				Sender:     sender,
+				FSBoard:    fsBoard,
+				Confirm:    confirm,
+				Print:      func(s string) { fmt.Print(s) },
+				Settle:     1 * time.Second,
+			})
+			go func() {
+				if err := pa.Run(ctx); err != nil {
+					log.Error("proto-agent exited", "err", err)
+				}
+			}()
+			fmt.Printf("conv proto-agent: model=%s auto=%v\n", model, *convAuto)
+		}
+
+		if *enableWire {
+			wa := wireagent.New(wireagent.Config{
+				ID:         "wire-agent",
+				ModuleRoot: absRoot,
+				Sender:     sender,
+				FSBoard:    fsBoard,
+				Confirm:    confirm,
+				Print:      func(s string) { fmt.Print(s) },
+				Settle:     1 * time.Second,
+			})
+			go func() {
+				if err := wa.Run(ctx); err != nil {
+					log.Error("wire-agent exited", "err", err)
+				}
+			}()
+			fmt.Printf("conv wire-agent: model=%s auto=%v\n", model, *convAuto)
+		}
 	}
 
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")

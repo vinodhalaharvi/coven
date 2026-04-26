@@ -2,173 +2,231 @@ package wireagent
 
 import (
 	"context"
-	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
-	"github.com/vinodhalaharvi/coven/codegen"
-	"github.com/vinodhalaharvi/coven/freeap"
-	"github.com/vinodhalaharvi/coven/ownership"
+	"github.com/vinodhalaharvi/coven/fsmonitor"
+	"github.com/vinodhalaharvi/coven/llm"
 )
 
-func TestIsWirePackage_RecognizesBuildTag(t *testing.T) {
-	dir := t.TempDir()
-	if IsWirePackage(dir) {
-		t.Error("empty dir should not be wire")
+func silentPrint(string)                                   {}
+func alwaysConfirm(context.Context, string, string) bool   { return true }
+func alwaysDeny(context.Context, string, string) bool      { return false }
+
+func TestIsRelevant(t *testing.T) {
+	cases := map[string]bool{
+		"app/wire.go":         true,
+		"auth/wire.go":        true,
+		"app/wire_gen.go":     true,
+		"go.mod":              true,
+		"main.go":             false,
+		"proto/x.proto":       false,
+		"gen/user/v1/user.pb.go": false,
+		"app/services.go":     false,
 	}
-
-	os.WriteFile(filepath.Join(dir, "wire.go"), []byte(`//go:build wireinject
-
-package x
-`), 0644)
-	if !IsWirePackage(dir) {
-		t.Error("dir with //go:build wireinject should be wire")
-	}
-
-	dir2 := t.TempDir()
-	os.WriteFile(filepath.Join(dir2, "wire.go"), []byte(`// +build wireinject
-
-package y
-`), 0644)
-	if !IsWirePackage(dir2) {
-		t.Error("dir with legacy +build wireinject should be wire")
-	}
-
-	dir3 := t.TempDir()
-	os.WriteFile(filepath.Join(dir3, "x.go"), []byte("package z\n"), 0644)
-	if IsWirePackage(dir3) {
-		t.Error("plain go dir should not be wire")
-	}
-}
-
-func TestDiscoverWirePackages(t *testing.T) {
-	root := t.TempDir()
-	a := filepath.Join(root, "a")
-	b := filepath.Join(root, "nested", "b")
-	c := filepath.Join(root, "c")
-	for _, d := range []string{a, b, c} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatal(err)
+	for path, want := range cases {
+		got := IsRelevant(path)
+		if got != want {
+			t.Errorf("IsRelevant(%q) = %v, want %v", path, got, want)
 		}
 	}
-	os.WriteFile(filepath.Join(a, "wire.go"), []byte("//go:build wireinject\npackage a\n"), 0644)
-	os.WriteFile(filepath.Join(b, "wire.go"), []byte("//go:build wireinject\npackage b\n"), 0644)
-	os.WriteFile(filepath.Join(c, "x.go"), []byte("package c\n"), 0644)
+}
 
-	pkgs, err := DiscoverWirePackages(root)
-	if err != nil {
-		t.Fatal(err)
+func TestFormatObservation(t *testing.T) {
+	if got := formatObservation(nil); !strings.Contains(got, "no specific files") {
+		t.Errorf("empty: %q", got)
 	}
-	if len(pkgs) != 2 {
-		t.Fatalf("got %d wire pkgs, want 2: %v", len(pkgs), pkgs)
+	if got := formatObservation([]string{"app/wire.go"}); !strings.Contains(got, "wire.go") {
+		t.Errorf("single: %q", got)
+	}
+	got := formatObservation([]string{"a/wire.go", "b/wire.go", "a/wire.go"})
+	if !strings.Contains(got, "2 files") {
+		t.Errorf("dedupe: %q", got)
 	}
 }
 
-func TestProject_HealthyAndUnhealthy(t *testing.T) {
-	p := Project("wire-x")
-
-	f := p(Cfg{PkgDir: "/x/y"}, codegen.RunResult{Output: "ok"}, []string{"/x/y/wire_gen.go"}, nil)
-	if !f.OK {
-		t.Error("healthy projection should be OK")
-	}
-	if f.AgentID != "wire-x" || f.PkgDir != "/x/y" {
-		t.Errorf("projection wrong: %+v", f)
+// TestAgent_BootstrapWakesOnStartup - verify agent runs once at startup.
+func TestAgent_BootstrapWakesOnStartup(t *testing.T) {
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
 	}
 
-	f2 := p(Cfg{PkgDir: "/x/y"}, codegen.RunResult{Output: "boom"}, nil, errAny("boom"))
-	if f2.OK {
-		t.Error("unhealthy projection should be OK=false")
+	var wakes int
+	var mu sync.Mutex
+	sender := func(ctx context.Context, system string, conv []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		mu.Lock()
+		wakes++
+		mu.Unlock()
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: "no wire packages, nothing to do"}},
+		}, llm.StopEndTurn, nil
+	}
+
+	a := New(Config{
+		ModuleRoot: root,
+		Sender:     sender,
+		Print:      silentPrint,
+		Confirm:    alwaysDeny,
+		Settle:     50 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	go a.Run(ctx)
+
+	deadline := time.After(800 * time.Millisecond)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("bootstrap wake never happened")
+		default:
+		}
+		mu.Lock()
+		w := wakes
+		mu.Unlock()
+		if w >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
-type errAny string
-
-func (e errAny) Error() string { return string(e) }
-
-// fakeRunner pretends to be wire — produces a wire_gen.go bytes blob.
-func fakeRunner(content []byte) codegen.Runner[Cfg] {
-	return func(ctx context.Context, cfg Cfg) (codegen.RunResult, error) {
-		path := filepath.Join(cfg.PkgDir, "wire_gen.go")
-		return codegen.RunResult{
-			Files:  []codegen.GeneratedFile{{Path: path, Bytes: content}},
-			Output: "ok",
-		}, nil
+// TestAgent_WakesOnWireGoEdit - editing wire.go triggers a wake.
+func TestAgent_WakesOnWireGoEdit(t *testing.T) {
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
 	}
-}
+	board := blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{})
 
-// TestAgent_FakeRunner_WritesWireGen drives codegen.Agent end-to-end with
-// a fake wire runner, asserting diff-write + ownership semantics hold.
-func TestAgent_FakeRunner_WritesWireGen(t *testing.T) {
-	pkgDir := t.TempDir()
-	root := filepath.Dir(pkgDir)
-
-	board := blackboard.New[Fact](blackboard.Config{})
-	reg := ownership.New()
-
-	cfg := codegen.Config[Cfg, Fact]{
-		AgentID:  "wire-test",
-		Cfg:      Cfg{PkgDir: pkgDir, ModuleRoot: root},
-		Runner:   fakeRunner([]byte("// wire_gen content\n")),
-		Project:  Project("wire-test"),
-		Board:    board,
-		BoardKey: func(f Fact) string { return Key(f.PkgDir) },
-		Owner:    reg,
+	var wakes int
+	var observations []string
+	var mu sync.Mutex
+	sender := func(ctx context.Context, system string, conv []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		mu.Lock()
+		wakes++
+		if len(conv) > 0 {
+			lastUser := conv[len(conv)-1]
+			for _, b := range lastUser.Blocks {
+				if b.Text != "" {
+					observations = append(observations, b.Text)
+				}
+			}
+		}
+		mu.Unlock()
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: "ack"}},
+		}, llm.StopEndTurn, nil
 	}
 
-	w := codegen.BuildReactiveWorker(cfg)
-	prog := w.Handle(codegen.Trigger{})
+	a := New(Config{
+		ModuleRoot: root,
+		Sender:     sender,
+		FSBoard:    board,
+		Print:      silentPrint,
+		Confirm:    alwaysConfirm,
+		Settle:     100 * time.Millisecond,
+	})
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	go a.Run(ctx)
 
-	fact, err := freeap.Run(ctx, prog)
-	if err != nil {
-		t.Fatal(err)
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	preBootstrap := wakes
+	mu.Unlock()
+
+	board.Post("k1", fsmonitor.FileChangeFact{
+		ChangedFiles: []string{filepath.Join(root, "app", "wire.go")},
+		ChangedAt:    time.Now(),
+	}, "test")
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("wake never happened. wakes=%d", wakes)
+		default:
+		}
+		mu.Lock()
+		w := wakes
+		mu.Unlock()
+		if w > preBootstrap {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	got := filepath.Join(pkgDir, "wire_gen.go")
-	body, err := os.ReadFile(got)
-	if err != nil {
-		t.Fatalf("wire_gen.go not written: %v", err)
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, obs := range observations {
+		if strings.Contains(obs, "wire.go") {
+			found = true
+		}
 	}
-	if string(body) != "// wire_gen content\n" {
-		t.Errorf("body = %q", body)
-	}
-	if !fact.OK {
-		t.Error("fact should be OK")
-	}
-	if owner, owned := reg.Owner(got); !owned || owner != "wire-test" {
-		t.Errorf("ownership = %q,%v, want wire-test,true", owner, owned)
+	if !found {
+		t.Errorf("expected observation to mention wire.go: %v", observations)
 	}
 }
 
-// TestAgent_FakeRunner_DiffWriteSkipsUnchanged verifies the cascade-breaker
-// works for the wire agent: re-running with identical content produces no
-// disk write and an empty ChangedFiles list.
-func TestAgent_FakeRunner_DiffWriteSkipsUnchanged(t *testing.T) {
-	pkgDir := t.TempDir()
-	body := []byte("// wire_gen body\n")
-
-	// Pre-populate.
-	os.WriteFile(filepath.Join(pkgDir, "wire_gen.go"), body, 0644)
-
-	cfg := codegen.Config[Cfg, Fact]{
-		AgentID:  "wire-test",
-		Cfg:      Cfg{PkgDir: pkgDir, ModuleRoot: filepath.Dir(pkgDir)},
-		Runner:   fakeRunner(body),
-		Project:  Project("wire-test"),
-		BoardKey: func(f Fact) string { return Key(f.PkgDir) },
+// TestAgent_IgnoresIrrelevantFiles - non-wire files shouldn't wake.
+func TestAgent_IgnoresIrrelevantFiles(t *testing.T) {
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
 	}
-	w := codegen.BuildReactiveWorker(cfg)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	board := blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{})
+
+	var wakes int
+	var mu sync.Mutex
+	sender := func(ctx context.Context, system string, conv []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		mu.Lock()
+		wakes++
+		mu.Unlock()
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: "ack"}},
+		}, llm.StopEndTurn, nil
+	}
+
+	a := New(Config{
+		ModuleRoot: root,
+		Sender:     sender,
+		FSBoard:    board,
+		Print:      silentPrint,
+		Confirm:    alwaysConfirm,
+		Settle:     100 * time.Millisecond,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
+	go a.Run(ctx)
 
-	fact, err := freeap.Run(ctx, w.Handle(codegen.Trigger{}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(fact.ChangedFiles) != 0 {
-		t.Errorf("expected 0 changed files, got %v", fact.ChangedFiles)
+	time.Sleep(400 * time.Millisecond)
+	mu.Lock()
+	preBootstrap := wakes
+	mu.Unlock()
+
+	// Post .proto change - irrelevant to wire agent.
+	board.Post("k1", fsmonitor.FileChangeFact{
+		ChangedFiles: []string{filepath.Join(root, "proto", "x.proto")},
+		ChangedAt:    time.Now(),
+	}, "test")
+
+	time.Sleep(500 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if wakes != preBootstrap {
+		t.Errorf("wakes increased from %d to %d on irrelevant file", preBootstrap, wakes)
 	}
 }
