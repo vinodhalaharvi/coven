@@ -17,7 +17,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -176,12 +175,16 @@ func buildSender(model string) llm.Sender {
 // makeStdinConfirm returns a ConfirmFunc that gates exec calls behind
 // a y/N prompt. autoConfirm bypasses the prompt (dev only).
 //
-// The mutex serializes prompts so two simultaneous agent confirms don't
-// interleave their output on the same stdin/stdout pair.
-var (
-	stdinMu     sync.Mutex
-	stdinReader = bufio.NewReader(os.Stdin)
-)
+// stdin handling: we deliberately do NOT use bufio. bufio's read-ahead
+// would consume bytes typed BETWEEN prompts (e.g. stray y's typed after
+// one prompt completed but before the next started), causing later
+// prompts to read pre-buffered garbage instead of the user's current
+// intent. Reading one byte at a time directly from os.Stdin until '\n'
+// is slower but behaves correctly under concurrent agent activity.
+//
+// We also drain stdin before each prompt to discard any keystrokes
+// the user typed while no prompt was active.
+var stdinMu sync.Mutex
 
 func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 	return func(ctx context.Context, toolName, summary string) bool {
@@ -191,6 +194,9 @@ func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 		}
 		stdinMu.Lock()
 		defer stdinMu.Unlock()
+
+		// Discard any pre-buffered keystrokes from between prompts.
+		drainStdin()
 
 		// Brief pause so the agent's narration above settles before the prompt.
 		time.Sleep(150 * time.Millisecond)
@@ -202,7 +208,7 @@ func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 		fmt.Printf("  %s\n", bar)
 		fmt.Print("  run? [y/N] ")
 
-		line, _ := stdinReader.ReadString('\n')
+		line := readLineDirect()
 		line = strings.TrimSpace(strings.ToLower(line))
 		ok := line == "y" || line == "yes"
 		if ok {
@@ -211,6 +217,46 @@ func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 			fmt.Print("  → declined\n\n")
 		}
 		return ok
+	}
+}
+
+// readLineDirect reads from os.Stdin one byte at a time until newline
+// or EOF. Avoids bufio's hidden read-ahead buffer.
+func readLineDirect() string {
+	var b strings.Builder
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 0 || err != nil {
+			break
+		}
+		if buf[0] == '\n' {
+			break
+		}
+		if buf[0] == '\r' {
+			continue
+		}
+		b.WriteByte(buf[0])
+	}
+	return b.String()
+}
+
+// drainStdin consumes any bytes already sitting in stdin's pipe buffer.
+// Sets stdin non-blocking, reads everything available, restores blocking.
+// Best-effort: silent no-op if non-blocking can't be set (e.g. on Windows).
+func drainStdin() {
+	fd := int(os.Stdin.Fd())
+	if err := setFdNonblock(fd, true); err != nil {
+		return
+	}
+	defer setFdNonblock(fd, false)
+
+	buf := make([]byte, 256)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 0 || err != nil {
+			return
+		}
 	}
 }
 
