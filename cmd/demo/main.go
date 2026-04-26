@@ -10,6 +10,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
@@ -19,9 +20,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/algebra/supervisor"
 	"github.com/vinodhalaharvi/coven/buildhealth"
@@ -31,6 +34,7 @@ import (
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
 	"github.com/vinodhalaharvi/coven/ownership"
+	"github.com/vinodhalaharvi/coven/protoagent"
 	"github.com/vinodhalaharvi/coven/protogen"
 	"github.com/vinodhalaharvi/coven/sources"
 	"github.com/vinodhalaharvi/coven/sqlcagent"
@@ -62,6 +66,8 @@ func main() {
 		reviewEvery = flag.Duration("review", 0, "minimum time between LLM reviews per package; 0 = never")
 		enableDiag  = flag.Bool("diagnose", false, "enable Claude-backed diagnostic agent (consults LLM on unhealthy facts, proposes shell commands, runs on confirm)")
 		diagAuto    = flag.Bool("diagnose-auto", false, "with -diagnose: skip y/n confirmation, run proposals automatically")
+		convProto   = flag.Bool("conv-proto", false, "enable conversational proto-agent (replaces reflex protogen behavior — keeps a running Claude conversation, asks before exec)")
+		convAuto    = flag.Bool("conv-auto", false, "with conversational agents: skip y/n confirmation prompts (DANGEROUS)")
 		verbose     = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Parse()
@@ -497,6 +503,60 @@ func main() {
 		startSup("sqlc", sqlcSup.Run, sqlcSup.Reports(), "🗄")
 	}
 
+	// ─── Conversational proto-agent (slice 1) ───────────────────────
+	// When -conv-proto is set, attach a Claude-backed agent that replaces
+	// the reflex protogen behavior. It survives alongside reflex agents
+	// for now so they can be compared side by side.
+	if *convProto {
+		if fsBoard == nil {
+			// Conv-proto needs the central fsmonitor too.
+			fsBoard = blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{
+				QuietFor: 1 * time.Second, Rounds: 3,
+			})
+			go func() {
+				err := fsmonitor.Run(context.Background(), fsmonitor.Config{
+					Root:     absRoot,
+					Debounce: *debounce,
+					Board:    fsBoard,
+				})
+				if err != nil {
+					log.Error("fsmonitor exited", "err", err)
+				}
+			}()
+			fmt.Printf("\nfsmonitor: watching %s (central FileChangeFact stream)\n", absRoot)
+		}
+		model := *llmModel
+		if model == "" {
+			model = "sonnet"
+		}
+		var sender llm.Sender
+		switch model {
+		case "haiku":
+			sender = llm.ClaudeConversation(llm.ClaudeConfig{Model: llm.ClaudeHaiku})
+		case "opus":
+			sender = llm.ClaudeConversation(llm.ClaudeConfig{Model: llm.ClaudeOpus})
+		default:
+			sender = llm.ClaudeConversation(llm.ClaudeConfig{Model: llm.ClaudeSonnet})
+		}
+
+		confirm := makeStdinConfirm(*convAuto)
+		pa := protoagent.New(protoagent.Config{
+			ID:         "proto-agent",
+			ModuleRoot: absRoot,
+			Sender:     sender,
+			FSBoard:    fsBoard,
+			Confirm:    confirm,
+			Print:      func(s string) { fmt.Print(s) },
+			Settle:     1 * time.Second,
+		})
+		go func() {
+			if err := pa.Run(ctx); err != nil {
+				log.Error("proto-agent exited", "err", err)
+			}
+		}()
+		fmt.Printf("conv proto-agent: model=%s auto=%v\n", model, *convAuto)
+	}
+
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")
 	fmt.Println()
 
@@ -574,5 +634,27 @@ func buildLLM(model string) llm.LLM {
 		return llm.Static(`{"summary":"demo","issues":[],"quality":0.9}`)
 	default:
 		return nil
+	}
+}
+
+// makeStdinConfirm returns an agent.ConfirmFunc that reads y/N from
+// stdin. If autoConfirm is true, it always returns true (skipping the
+// prompt). Serializes stdin reads via a global mutex so concurrent
+// agents don't interleave prompts.
+var stdinMu sync.Mutex
+var stdinReader = bufio.NewReader(os.Stdin)
+
+func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
+	return func(ctx context.Context, toolName, summary string) bool {
+		if autoConfirm {
+			fmt.Printf("  [confirm] %s — auto-approved\n", summary)
+			return true
+		}
+		stdinMu.Lock()
+		defer stdinMu.Unlock()
+		fmt.Printf("\n  [confirm] %s\n  run? [y/N] ", summary)
+		line, _ := stdinReader.ReadString('\n')
+		line = strings.TrimSpace(strings.ToLower(line))
+		return line == "y" || line == "yes"
 	}
 }
