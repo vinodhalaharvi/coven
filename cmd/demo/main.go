@@ -101,8 +101,8 @@ func main() {
 		log.Error("walking root", "err", err)
 		os.Exit(1)
 	}
-	if len(pkgs) == 0 && *protoRoot == "" {
-		log.Error("no Go packages found and no -proto-root given; nothing to do", "root", absRoot)
+	if len(pkgs) == 0 && *protoRoot == "" && !*convProto {
+		log.Error("no Go packages found, no -proto-root given, and no conversational agent enabled; nothing to do", "root", absRoot)
 		os.Exit(1)
 	}
 	if len(pkgs) == 0 {
