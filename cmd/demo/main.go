@@ -28,7 +28,6 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/algebra/supervisor"
 	"github.com/vinodhalaharvi/coven/buildhealth"
-	"github.com/vinodhalaharvi/coven/codegen"
 	"github.com/vinodhalaharvi/coven/diagnostic"
 	"github.com/vinodhalaharvi/coven/ensemble"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
@@ -52,20 +51,16 @@ func main() {
 		enableLint  = flag.Bool("lint", false, "enable golangci-lint tool agent")
 		lintBin     = flag.String("lint-bin", "golangci-lint", "golangci-lint binary name/path")
 		lintSettle  = flag.Duration("lint-settle", 2*time.Second, "wait this long after package activity quiets before linting")
-		enableBuild = flag.Bool("build", false, "enable BuildHealthAgent (runs go build ./... at module root)")
-		goBin       = flag.String("go-bin", "go", "go binary name/path")
-		buildSettle = flag.Duration("build-settle", 1500*time.Millisecond, "wait this long after activity quiets before module build")
-		enableWire  = flag.Bool("conv-wire", false, "enable conversational wire-agent (Claude-driven, replaces reflex wireagent)")
-		enableSqlc  = flag.Bool("sqlc", false, "enable SqlcAgent if sqlc.yaml is present at module root")
-		sqlcBin     = flag.String("sqlc-bin", "sqlc", "sqlc binary name/path")
-		sqlcGenRoot = flag.String("sqlc-gen-root", "", "directory containing sqlc-generated code (required if -sqlc)")
+		enableWire  = flag.Bool("conv-wire", false, "enable conversational wire-agent (Claude-driven)")
+		enableSqlc  = flag.Bool("conv-sqlc", false, "enable conversational sqlc-agent (Claude-driven)")
+		enableBuild = flag.Bool("conv-build", false, "enable conversational build-health agent (Claude-driven module-wide go build)")
 		tick        = flag.Duration("tick", 500*time.Millisecond, "ensemble polling interval")
 		debounce    = flag.Duration("debounce", 200*time.Millisecond, "fsnotify debounce per agent")
 		llmModel    = flag.String("llm", "", "LLM model: haiku|sonnet|opus|static (optional)")
 		reviewEvery = flag.Duration("review", 0, "minimum time between LLM reviews per package; 0 = never")
 		enableDiag  = flag.Bool("diagnose", false, "enable Claude-backed diagnostic agent (consults LLM on unhealthy facts, proposes shell commands, runs on confirm)")
 		diagAuto    = flag.Bool("diagnose-auto", false, "with -diagnose: skip y/n confirmation, run proposals automatically")
-		convProto   = flag.Bool("conv-proto", false, "enable conversational proto-agent (replaces reflex protogen behavior — keeps a running Claude conversation, asks before exec)")
+		convProto   = flag.Bool("conv-proto", false, "enable conversational proto-agent (Claude-driven)")
 		convAuto    = flag.Bool("conv-auto", false, "with conversational agents: skip y/n confirmation prompts (DANGEROUS)")
 		verbose     = flag.Bool("v", false, "verbose logging")
 	)
@@ -100,7 +95,7 @@ func main() {
 		log.Error("walking root", "err", err)
 		os.Exit(1)
 	}
-	if len(pkgs) == 0 && *protoRoot == "" && !*convProto && !*enableWire {
+	if len(pkgs) == 0 && *protoRoot == "" && !*convProto && !*enableWire && !*enableSqlc && !*enableBuild {
 		log.Error("no Go packages found, no -proto-root given, and no conversational agent enabled; nothing to do", "root", absRoot)
 		os.Exit(1)
 	}
@@ -254,62 +249,13 @@ func main() {
 		fmt.Printf("\nfsmonitor: watching %s (central FileChangeFact stream)\n", absRoot)
 	}
 
-	// BuildHealthAgent — module-level go build ./...
-	var buildSup *supervisor.Supervisor[buildhealth.Trigger, []buildhealth.BuildHealthFact]
-	var buildBoard *blackboard.Board[buildhealth.BuildHealthFact]
-	if *enableBuild {
-		buildBoard = blackboard.New[buildhealth.BuildHealthFact](blackboard.Config{
-			QuietFor: 1 * time.Second, Rounds: 3,
-		})
-		buildSup = supervisor.New[buildhealth.Trigger, []buildhealth.BuildHealthFact](supervisor.Config{
-			Name: "build-sup", Logger: log,
-		})
-		buildSup.Attach(buildhealth.BuildReactiveWorker(buildhealth.Config{
-			AgentID:    "buildhealth",
-			ModuleRoot: absRoot,
-			GoBin:      *goBin,
-			Packages:   pkgDirs,
-			FSBoard:    fsBoard,
-			BuildBoard: buildBoard,
-			SettleFor:  *buildSettle,
-		}))
-		fmt.Printf("build agent: go build ./... settle=%s\n", *buildSettle)
-	}
-
+	// (Reflex BuildHealthAgent removed — see -conv-build flag below for
+	// the conversational replacement.)
 	// (Reflex WireAgent removed — see -conv-wire flag below for the
 	// conversational replacement.)
+	// (Reflex SqlcAgent removed — see -conv-sqlc flag below for the
+	// conversational replacement.)
 
-	// SqlcAgent — single agent for the module.
-	var sqlcSup *supervisor.Supervisor[codegen.Trigger, sqlcagent.Fact]
-	var sqlcBoard *blackboard.Board[sqlcagent.Fact]
-	if *enableSqlc {
-		if !sqlcagent.HasSqlcConfig(absRoot) {
-			fmt.Printf("sqlc agent: no sqlc.yaml/yml/json at %s; skipping\n", absRoot)
-		} else if *sqlcGenRoot == "" {
-			fmt.Printf("sqlc agent: -sqlc-gen-root required; skipping\n")
-		} else {
-			sqlcAbsGen, _ := filepath.Abs(*sqlcGenRoot)
-			if r, err := filepath.EvalSymlinks(sqlcAbsGen); err == nil {
-				sqlcAbsGen = r
-			}
-			sqlcBoard = blackboard.New[sqlcagent.Fact](blackboard.Config{
-				QuietFor: 1 * time.Second, Rounds: 3,
-			})
-			sqlcSup = supervisor.New[codegen.Trigger, sqlcagent.Fact](supervisor.Config{
-				Name: "sqlc-sup", Logger: log,
-			})
-			sqlcSup.Attach(sqlcagent.BuildReactiveWorker(
-				"sqlc",
-				sqlcagent.Cfg{
-					ModuleRoot: absRoot,
-					GenRoot:    sqlcAbsGen,
-					SqlcBin:    *sqlcBin,
-				},
-				fsBoard, sqlcBoard, reg,
-			))
-			fmt.Printf("sqlc agent: gen-root=%s\n", sqlcAbsGen)
-		}
-	}
 
 	ens := ensemble.New(ensemble.Config{Tick: *tick, Convergence: ensemble.All()})
 	ensemble.AttachSupervisor(ens, "pkg", pkgSup)
@@ -321,14 +267,6 @@ func main() {
 	if lintSup != nil {
 		ensemble.AttachSupervisor(ens, "lint", lintSup)
 		ensemble.AttachBlackboard(ens, "lint-board", toolBoard)
-	}
-	if buildSup != nil {
-		ensemble.AttachSupervisor(ens, "build", buildSup)
-		ensemble.AttachBlackboard(ens, "build-board", buildBoard)
-	}
-	if sqlcSup != nil {
-		ensemble.AttachSupervisor(ens, "sqlc", sqlcSup)
-		ensemble.AttachBlackboard(ens, "sqlc-board", sqlcBoard)
 	}
 	if fsBoard != nil {
 		ensemble.AttachBlackboard(ens, "fs-board", fsBoard)
@@ -375,30 +313,8 @@ func main() {
 			}
 		}()
 
-		// Subscriber: BuildHealthFacts → UnhealthyFact.
-		if buildBoard != nil {
-			ch, _ := buildBoard.Subscribe(ctx, "*", 32)
-			go func() {
-				for f := range ch {
-					if f.Value.OK {
-						continue
-					}
-					var errText strings.Builder
-					if f.Value.Output != "" {
-						errText.WriteString(f.Value.Output)
-					}
-					for _, e := range f.Value.Errors {
-						fmt.Fprintf(&errText, "\n%s:%d:%d: %s", e.File, e.Line, e.Col, e.Message)
-					}
-					diag.Observe(ctx, diagnostic.UnhealthyFact{
-						Source:    "buildhealth",
-						Subject:   string(f.Value.Pkg),
-						ErrorText: errText.String(),
-						When:      f.Value.ObservedAt,
-					})
-				}
-			}()
-		}
+		// (Reflex BuildHealthFact subscriber removed — the build-agent
+		// now consults Claude itself on failures.)
 		// Subscriber: ProtoGenFacts.
 		if genBoard != nil {
 			ch, _ := genBoard.Subscribe(ctx, "*", 32)
@@ -441,18 +357,12 @@ func main() {
 	if lintSup != nil {
 		startSup("lint", lintSup.Run, lintSup.Reports(), "🔍")
 	}
-	if buildSup != nil {
-		startSup("build", buildSup.Run, buildSup.Reports(), "🔨")
-	}
-	if sqlcSup != nil {
-		startSup("sqlc", sqlcSup.Run, sqlcSup.Reports(), "🗄")
-	}
 
 	// ─── Conversational agents (slice 2) ───────────────────────────────
 	// When any -conv-* flag is set, we need a shared central fsmonitor
 	// (so multiple agents subscribe to the same FileChangeFact stream)
 	// and a shared LLM sender + confirm helper.
-	convEnabled := *convProto || *enableWire
+	convEnabled := *convProto || *enableWire || *enableSqlc || *enableBuild
 	if convEnabled {
 		if fsBoard == nil {
 			fsBoard = blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{
@@ -519,6 +429,42 @@ func main() {
 				}
 			}()
 			fmt.Printf("conv wire-agent: model=%s auto=%v\n", model, *convAuto)
+		}
+
+		if *enableSqlc {
+			sa := sqlcagent.New(sqlcagent.Config{
+				ID:         "sqlc-agent",
+				ModuleRoot: absRoot,
+				Sender:     sender,
+				FSBoard:    fsBoard,
+				Confirm:    confirm,
+				Print:      func(s string) { fmt.Print(s) },
+				Settle:     1 * time.Second,
+			})
+			go func() {
+				if err := sa.Run(ctx); err != nil {
+					log.Error("sqlc-agent exited", "err", err)
+				}
+			}()
+			fmt.Printf("conv sqlc-agent: model=%s auto=%v\n", model, *convAuto)
+		}
+
+		if *enableBuild {
+			ba := buildhealth.New(buildhealth.Config{
+				ID:         "build-agent",
+				ModuleRoot: absRoot,
+				Sender:     sender,
+				FSBoard:    fsBoard,
+				Confirm:    confirm,
+				Print:      func(s string) { fmt.Print(s) },
+				Settle:     3 * time.Second,
+			})
+			go func() {
+				if err := ba.Run(ctx); err != nil {
+					log.Error("build-agent exited", "err", err)
+				}
+			}()
+			fmt.Printf("conv build-agent: model=%s auto=%v\n", model, *convAuto)
 		}
 	}
 

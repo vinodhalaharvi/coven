@@ -1,184 +1,188 @@
-// Package sqlcagent implements a codegen.Agent for sqlc.
-//
-// sqlc generates type-safe Go code from .sql files. Configuration lives
-// in sqlc.yaml (typically at the module root). When .sql files change,
-// sqlc regenerates the Go output.
-//
-// This agent fires on FileChangeFacts where .sql files (or sqlc.yaml)
-// are touched. The runner invokes `sqlc generate` at the module root
-// and reads back generated Go files for the codegen.Agent's diff-write
-// to handle cascade-breaking.
+// Package sqlcagent is the conversational agent for sqlc-generated
+// type-safe Go code from .sql files. Its job is to keep the generated
+// Go output consistent with .sql sources and sqlc.yaml configuration.
 package sqlcagent
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
-	"github.com/vinodhalaharvi/coven/algebra/supervisor"
-	"github.com/vinodhalaharvi/coven/codegen"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
-	"github.com/vinodhalaharvi/coven/ownership"
+	"github.com/vinodhalaharvi/coven/llm"
 )
 
-// Cfg is the sqlc-agent's per-config type.
-type Cfg struct {
-	ModuleRoot string // where sqlc.yaml lives; sqlc runs here
-	GenRoot    string // base directory where sqlc writes outputs (for reading back)
-	SqlcBin    string // path or name; defaults to "sqlc"
+const Role = `You are the sqlc agent for a Go project. Your single job is to keep generated Go code from SQL files consistent and current.
+
+A sqlc-using project has:
+  - sqlc.yaml (or sqlc.yml, sqlc.json) at the project root with version, engine, queries, schema, and gen settings.
+  - .sql files for queries and schema migrations.
+  - Generated .go files (typically under an internal/db/ or gen/db/ directory specified by sqlc.yaml).
+
+Your method:
+  1. When you wake, look for sqlc config (sqlc.yaml, sqlc.yml, sqlc.json) at project root. If absent, the project has no sqlc domain — say so and stop.
+  2. Read sqlc.yaml to understand the schema/query paths and the output directory.
+  3. Check whether the generated files exist and look current. If a .sql file was edited or generated files are missing, regenerate.
+  4. Regeneration: 'sqlc generate' from the project root.
+  5. Diagnose failures from sqlc output:
+       - 'sqlc: command not found' → propose 'go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest' (note: this requires a working Go install)
+       - schema parse errors → human SQL to fix; explain plainly and stop
+       - missing dependency in generated code (e.g. github.com/jackc/pgx/v5) → propose 'go get <module>'
+  6. After regeneration, the project should compile in your domain (you may run 'go build ./...' as a sanity check, but don't fix non-sqlc build errors).
+
+Constraints:
+  - You do NOT edit .sql files yourself. Schema and query design are human decisions.
+  - You do NOT touch *.pb.go, wire_gen.go, or any output owned by other agents.
+  - You do NOT alter go.mod beyond adding sqlc-runtime dependencies.
+  - When you've reached a consistent state, return one short final message describing what you did.`
+
+type Config struct {
+	ID         string
+	ModuleRoot string
+	Sender     llm.Sender
+	FSBoard    *blackboard.Board[fsmonitor.FileChangeFact]
+	Confirm    agent.ConfirmFunc
+	Print      agent.PrintFunc
+	Settle     time.Duration
 }
 
-// Fact is the thin status fact the agent posts.
-type Fact struct {
-	AgentID      string        `json:"agent_id"`
-	GenRoot      string        `json:"gen_root"`
-	OK           bool          `json:"ok"`
-	ChangedFiles []string      `json:"changed_files,omitempty"`
-	Output       string        `json:"output,omitempty"`
-	Duration     time.Duration `json:"duration"`
-	ObservedAt   time.Time     `json:"observed_at"`
+type Agent struct {
+	cfg     Config
+	inner   *agent.Agent
+	mu      sync.Mutex
+	pending bool
 }
 
-// Key returns the blackboard key for an sqlc fact.
-func Key(genRoot string) string {
-	return "sqlc:" + genRoot
+func New(cfg Config) *Agent {
+	if cfg.ID == "" {
+		cfg.ID = "sqlc-agent"
+	}
+	if cfg.Settle <= 0 {
+		cfg.Settle = 1 * time.Second
+	}
+	inner := agent.New(agent.Config{
+		ID:      cfg.ID,
+		Role:    Role,
+		Tools:   agent.StandardTools(cfg.ModuleRoot),
+		Sender:  cfg.Sender,
+		Confirm: cfg.Confirm,
+		Print:   cfg.Print,
+	})
+	return &Agent{cfg: cfg, inner: inner}
 }
 
-// HasSqlcConfig reports whether moduleRoot has a sqlc config file.
-func HasSqlcConfig(moduleRoot string) bool {
-	for _, name := range []string{"sqlc.yaml", "sqlc.yml", "sqlc.json"} {
-		if _, err := os.Stat(filepath.Join(moduleRoot, name)); err == nil {
-			return true
-		}
+// IsRelevant: .sql files, sqlc config files.
+func IsRelevant(path string) bool {
+	base := filepath.Base(path)
+	if strings.HasSuffix(base, ".sql") {
+		return true
+	}
+	if base == "sqlc.yaml" || base == "sqlc.yml" || base == "sqlc.json" {
+		return true
 	}
 	return false
 }
 
-// Runner returns a codegen.Runner that invokes sqlc at the module root
-// and reads back .go files under genRoot.
-func Runner() codegen.Runner[Cfg] {
-	return func(ctx context.Context, cfg Cfg) (codegen.RunResult, error) {
-		bin := cfg.SqlcBin
-		if bin == "" {
-			bin = "sqlc"
-		}
-		cmd := exec.CommandContext(ctx, bin, "generate")
-		cmd.Dir = cfg.ModuleRoot
-		out, runErr := cmd.CombinedOutput()
-		output := string(out)
-		if runErr != nil {
-			return codegen.RunResult{Output: output}, fmt.Errorf("sqlc generate: %w", runErr)
-		}
+func (a *Agent) Run(ctx context.Context) error {
+	go a.wakeOnce(ctx, "startup: just attached. Survey the project for sqlc config and bring the sqlc domain to a healthy state.")
 
-		// Walk genRoot collecting .go files.
-		var files []codegen.GeneratedFile
-		walkErr := filepath.Walk(cfg.GenRoot, func(path string, info os.FileInfo, werr error) error {
-			if werr != nil {
-				return nil // skip unreadable nodes
-			}
-			if info.IsDir() {
-				return nil
-			}
-			if !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-			body, rerr := os.ReadFile(path)
-			if rerr != nil {
-				return rerr
-			}
-			files = append(files, codegen.GeneratedFile{Path: path, Bytes: body})
-			return nil
-		})
-		if walkErr != nil {
-			return codegen.RunResult{Output: output}, walkErr
-		}
-		return codegen.RunResult{Files: files, Output: output}, nil
-	}
-}
-
-// Project converts a codegen.RunResult into a Fact.
-func Project(agentID string) codegen.Project[Cfg, Fact] {
-	return func(cfg Cfg, res codegen.RunResult, changed []string, runErr error) Fact {
-		return Fact{
-			AgentID:      agentID,
-			GenRoot:      cfg.GenRoot,
-			OK:           runErr == nil,
-			ChangedFiles: changed,
-			Output:       res.Output,
-			Duration:     res.Duration,
-			ObservedAt:   time.Now(),
-		}
-	}
-}
-
-// BuildReactiveWorker constructs the worker. The agent fires when:
-//   - any .sql file or sqlc.yaml changes anywhere under ModuleRoot
-func BuildReactiveWorker(
-	agentID string,
-	cfg Cfg,
-	fsBoard *blackboard.Board[fsmonitor.FileChangeFact],
-	sqlcBoard *blackboard.Board[Fact],
-	owner ownership.Registry,
-) supervisor.ReactiveWorker[codegen.Trigger, Fact] {
-	src := func(ctx context.Context) (<-chan codegen.Trigger, error) {
-		// Filter: keep facts where any changed file is .sql or named sqlc.{yaml,yml,json}.
-		filter := func(f fsmonitor.FileChangeFact) bool {
-			for _, p := range f.ChangedFiles {
-				base := filepath.Base(p)
-				if strings.HasSuffix(p, ".sql") {
-					return true
-				}
-				if base == "sqlc.yaml" || base == "sqlc.yml" || base == "sqlc.json" {
-					return true
-				}
-			}
-			return false
-		}
-		raw := fsmonitor.Subscribe(fsBoard, filter)
-		ch, err := raw(ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make(chan codegen.Trigger, 4)
-		go func() {
-			defer close(out)
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case f, ok := <-ch:
-					if !ok {
-						return
-					}
-					select {
-					case out <- codegen.Trigger{
-						Reason:       "fs:sql-or-config",
-						ChangedFiles: f.ChangedFiles,
-						At:           f.ChangedAt,
-					}:
-					case <-ctx.Done():
-						return
-					}
-				}
-			}
-		}()
-		return out, nil
+	if a.cfg.FSBoard == nil {
+		<-ctx.Done()
+		return nil
 	}
 
-	return codegen.BuildReactiveWorker(codegen.Config[Cfg, Fact]{
-		AgentID:        agentID,
-		Cfg:            cfg,
-		Runner:         Runner(),
-		Project:        Project(agentID),
-		Board:          sqlcBoard,
-		BoardKey:       func(f Fact) string { return Key(f.GenRoot) },
-		Owner:          owner,
-		Source:         src,
-		HealthFromFact: func(f Fact) bool { return f.OK },
+	sub := fsmonitor.Subscribe(a.cfg.FSBoard, func(f fsmonitor.FileChangeFact) bool {
+		for _, p := range f.ChangedFiles {
+			if IsRelevant(p) {
+				return true
+			}
+		}
+		return false
 	})
+	ch, err := sub(ctx)
+	if err != nil {
+		return err
+	}
+
+	var pendingFiles []string
+	var timer *time.Timer
+	resetTimer := func() {
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = time.AfterFunc(a.cfg.Settle, func() {
+			files := pendingFiles
+			pendingFiles = nil
+			a.wakeOnce(ctx, formatObservation(files))
+		})
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case f, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			for _, p := range f.ChangedFiles {
+				if IsRelevant(p) {
+					pendingFiles = append(pendingFiles, p)
+				}
+			}
+			resetTimer()
+		}
+	}
+}
+
+func (a *Agent) wakeOnce(ctx context.Context, observation string) {
+	a.mu.Lock()
+	if a.pending {
+		a.mu.Unlock()
+		return
+	}
+	a.pending = true
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.pending = false
+		a.mu.Unlock()
+	}()
+
+	a.cfg.Print(fmt.Sprintf("\n  [%s] waking: %s\n", a.cfg.ID, truncate(observation, 80)))
+	if _, err := a.inner.Wake(ctx, observation); err != nil {
+		a.cfg.Print(fmt.Sprintf("  [%s] error: %v\n", a.cfg.ID, err))
+	}
+}
+
+func (a *Agent) HistoryLen() int { return a.inner.HistoryLen() }
+
+func formatObservation(files []string) string {
+	if len(files) == 0 {
+		return "filesystem activity in your domain (no specific files identified)."
+	}
+	seen := map[string]bool{}
+	uniq := make([]string, 0, len(files))
+	for _, f := range files {
+		if !seen[f] {
+			seen[f] = true
+			uniq = append(uniq, f)
+		}
+	}
+	if len(uniq) == 1 {
+		return "observed change to: " + uniq[0]
+	}
+	return fmt.Sprintf("observed changes to %d files in your domain:\n  %s", len(uniq), strings.Join(uniq, "\n  "))
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
