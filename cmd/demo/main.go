@@ -32,9 +32,11 @@ import (
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/buildhealth"
+	"github.com/vinodhalaharvi/coven/dockeragent"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
 	"github.com/vinodhalaharvi/coven/mainbuilder"
+	"github.com/vinodhalaharvi/coven/makefileagent"
 	"github.com/vinodhalaharvi/coven/protoagent"
 	"github.com/vinodhalaharvi/coven/sqlcagent"
 	"github.com/vinodhalaharvi/coven/wireagent"
@@ -49,8 +51,10 @@ func main() {
 		convWire  = flag.Bool("conv-wire", false, "enable conversational wire-agent")
 		convSqlc  = flag.Bool("conv-sqlc", false, "enable conversational sqlc-agent")
 		convBuild = flag.Bool("conv-build", false, "enable conversational build-health agent")
-		bootstrap = flag.Bool("bootstrap", false, "wake-once: propose starter main.go file(s) for missing entry points, then go dormant")
-		convAuto  = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
+		bootstrap     = flag.Bool("bootstrap", false, "wake-once: propose starter main.go file(s) for missing entry points, then go dormant")
+		bootstrapDock = flag.Bool("bootstrap-docker", false, "wake-once: propose Dockerfile + docker-compose.yaml + .dockerignore")
+		bootstrapMake = flag.Bool("bootstrap-make", false, "wake-once: propose a starter Makefile with canonical Go-project targets")
+		convAuto      = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
 	)
 	flag.Parse()
@@ -61,8 +65,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap {
-		log.Error("no agents enabled. Try -conv-proto, -conv-wire, -conv-sqlc, -conv-build, or -bootstrap")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake {
+		log.Error("no agents enabled. Try -conv-proto, -conv-wire, -conv-sqlc, -conv-build, -bootstrap, -bootstrap-docker, or -bootstrap-make")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -152,6 +156,24 @@ func main() {
 		})
 		go runAgent(ctx, log, "main-builder", mb.Run)
 		fmt.Printf("bootstrap main-builder: model=%s auto=%v (wakes once at startup)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapDock {
+		da := dockeragent.New(dockeragent.Config{
+			ID: "docker-agent", ModuleRoot: absRoot,
+			Sender: sender, Confirm: confirm, Print: printf,
+		})
+		go runAgent(ctx, log, "docker-agent", da.Run)
+		fmt.Printf("bootstrap docker-agent: model=%s auto=%v (wakes once at startup)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapMake {
+		ma := makefileagent.New(makefileagent.Config{
+			ID: "makefile-agent", ModuleRoot: absRoot,
+			Sender: sender, Confirm: confirm, Print: printf,
+		})
+		go runAgent(ctx, log, "makefile-agent", ma.Run)
+		fmt.Printf("bootstrap makefile-agent: model=%s auto=%v (wakes once at startup)\n", *llmModel, *convAuto)
 	}
 
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")
