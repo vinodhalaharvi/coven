@@ -34,6 +34,7 @@ import (
 	"github.com/vinodhalaharvi/coven/buildhealth"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/mainbuilder"
 	"github.com/vinodhalaharvi/coven/protoagent"
 	"github.com/vinodhalaharvi/coven/sqlcagent"
 	"github.com/vinodhalaharvi/coven/wireagent"
@@ -48,6 +49,7 @@ func main() {
 		convWire  = flag.Bool("conv-wire", false, "enable conversational wire-agent")
 		convSqlc  = flag.Bool("conv-sqlc", false, "enable conversational sqlc-agent")
 		convBuild = flag.Bool("conv-build", false, "enable conversational build-health agent")
+		bootstrap = flag.Bool("bootstrap", false, "wake-once: propose starter main.go file(s) for missing entry points, then go dormant")
 		convAuto  = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
 	)
@@ -59,8 +61,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild {
-		log.Error("no agents enabled. Try -conv-proto, -conv-wire, -conv-sqlc, or -conv-build")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap {
+		log.Error("no agents enabled. Try -conv-proto, -conv-wire, -conv-sqlc, -conv-build, or -bootstrap")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -139,6 +141,17 @@ func main() {
 		})
 		go runAgent(ctx, log, "build-agent", ba.Run)
 		fmt.Printf("conv build-agent: model=%s auto=%v\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrap {
+		// Wake-once bootstrap. Surveys the project, proposes starter
+		// main.go for missing entry points, goes dormant after.
+		mb := mainbuilder.New(mainbuilder.Config{
+			ID: "main-builder", ModuleRoot: absRoot,
+			Sender: sender, Confirm: confirm, Print: printf,
+		})
+		go runAgent(ctx, log, "main-builder", mb.Run)
+		fmt.Printf("bootstrap main-builder: model=%s auto=%v (wakes once at startup)\n", *llmModel, *convAuto)
 	}
 
 	fmt.Println("\nwatching for changes (Ctrl-C to stop)…")
