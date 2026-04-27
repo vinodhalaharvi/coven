@@ -19,13 +19,15 @@ import (
 // have available unless there's a reason not to. moduleRoot scopes file
 // access so agents can't escape the project.
 //
-// Pure tools (read_file, list_files, search_text) run without confirmation.
-// The exec tool always requires confirmation via the agent's ConfirmFunc.
+// Pure tools (read_file, list_files, search_text, pureast) run without
+// confirmation. The exec tool always requires confirmation via the
+// agent's ConfirmFunc.
 func StandardTools(moduleRoot string) []Tool {
 	return []Tool{
 		ReadFileTool(moduleRoot),
 		ListFilesTool(moduleRoot),
 		SearchTextTool(moduleRoot),
+		PureAstTool(moduleRoot),
 		ExecTool(moduleRoot),
 	}
 }

@@ -1,3 +1,7 @@
+github.com/Pure-Company/pureast v0.0.0-20260427192944-8315b804cffa h1:Dvvlk0T+pHG4Q3uvPwyRxHz7K2b0sYhBao2N+Oyxl2k=
+github.com/Pure-Company/pureast v0.0.0-20260427192944-8315b804cffa/go.mod h1:1IQ7YHBcnoc9YSjomjoTbTIV1kgic1vVh2Yo74dSebA=
+github.com/Pure-Company/purekernels v0.0.0-20260427192250-00ba879fa2f0 h1:NZHzha08Hf1tMZtQ+NqVEg/F4eUT2OvlpNxeePL+Xxs=
+github.com/Pure-Company/purekernels v0.0.0-20260427192250-00ba879fa2f0/go.mod h1:xtgPNO/0vt9w9ShI/oXkrrykGdlry/Tkl0+/NgirUeY=
 github.com/fsnotify/fsnotify v1.7.0 h1:8JEhPFa5W2WU7YfeZzPNqzMP6Lwt7L2715Ggo0nosvA=
 github.com/fsnotify/fsnotify v1.7.0/go.mod h1:40Bi/Hjc2AVfZrqy+aj+yEI+/bRxZnMJyTJwOpGvigM=
 golang.org/x/sys v0.4.0 h1:Zr2JFtRQNX3BCZ8YtxRE9hNJYC8J6I1MVbMg6owUp18=
