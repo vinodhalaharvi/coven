@@ -32,6 +32,7 @@ import (
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/buildhealth"
+	"github.com/vinodhalaharvi/coven/connectagent"
 	"github.com/vinodhalaharvi/coven/dockeragent"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/ginagent"
@@ -56,8 +57,9 @@ func main() {
 		bootstrap     = flag.Bool("bootstrap", false, "wake-once: propose starter main.go file(s) for missing entry points, then go dormant")
 		bootstrapDock = flag.Bool("bootstrap-docker", false, "wake-once: propose Dockerfile + docker-compose.yaml + .dockerignore")
 		bootstrapMake = flag.Bool("bootstrap-make", false, "wake-once: propose a starter Makefile with canonical Go-project targets")
-		bootstrapGin  = flag.Bool("bootstrap-gin", false, "steady-state: keep gin handlers in sync with sqlc data layer")
-		bootstrapAuto = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
+		bootstrapGin     = flag.Bool("bootstrap-gin", false, "steady-state: keep gin handlers in sync with sqlc data layer")
+		bootstrapConnect = flag.Bool("bootstrap-connect", false, "steady-state: keep connect-go HTTP handlers in sync with proto services")
+		bootstrapAuto    = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
 		convAuto      = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
 	)
@@ -69,8 +71,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapAuto {
-		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap, -bootstrap-gin")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapConnect && !*bootstrapAuto {
+		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap, -bootstrap-gin, -bootstrap-connect")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -189,6 +191,17 @@ func main() {
 		})
 		go runAgent(ctx, log, "gin-agent", ga.Run)
 		fmt.Printf("conv gin-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapConnect {
+		ca := connectagent.New(connectagent.Config{
+			ID: "connect-agent", ModuleRoot: absRoot,
+			Sender: sender, FSBoard: fsBoard,
+			Confirm: confirm, Print: printf,
+			Settle: 2 * time.Second,
+		})
+		go runAgent(ctx, log, "connect-agent", ca.Run)
+		fmt.Printf("conv connect-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
 	}
 
 	if *bootstrapAuto {

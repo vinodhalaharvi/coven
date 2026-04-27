@@ -295,3 +295,20 @@ func TestAgent_ConsultsTools(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+func TestRoleMentionsBufGenAwareness(t *testing.T) {
+	// The role string was extended to make proto-agent aware of
+	// buf.gen.yaml plugin alignment with go.mod deps. Guard against
+	// the clause being accidentally removed.
+	must := []string{
+		"buf.gen.yaml",
+		"protoc-gen-go-grpc",
+		"protoc-gen-connect-go",
+		"connectrpc.com/connect",
+	}
+	for _, frag := range must {
+		if !strings.Contains(Role, frag) {
+			t.Errorf("Role missing buf.gen.yaml-awareness clause: %q", frag)
+		}
+	}
+}
