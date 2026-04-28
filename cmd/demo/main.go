@@ -43,6 +43,7 @@ import (
 	"github.com/vinodhalaharvi/coven/protoagent"
 	"github.com/vinodhalaharvi/coven/registry"
 	"github.com/vinodhalaharvi/coven/sqlcagent"
+	"github.com/vinodhalaharvi/coven/testagent"
 	"github.com/vinodhalaharvi/coven/wireagent"
 )
 
@@ -61,6 +62,7 @@ func main() {
 		bootstrapGin     = flag.Bool("bootstrap-gin", false, "steady-state: keep gin handlers in sync with sqlc data layer")
 		bootstrapConnect    = flag.Bool("bootstrap-connect", false, "steady-state: keep connect-go HTTP handlers in sync with proto services")
 		bootstrapGoGenerate = flag.Bool("bootstrap-gogenerate", false, "steady-state: run //go:generate directives when their inputs change")
+		bootstrapTest       = flag.Bool("bootstrap-test", false, "steady-state: scaffold tests for public functions and verify go test passes")
 		bootstrapAuto       = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
 		convAuto      = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
@@ -73,8 +75,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapConnect && !*bootstrapGoGenerate && !*bootstrapAuto {
-		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap-gin, -bootstrap-connect, -bootstrap-gogenerate")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapConnect && !*bootstrapGoGenerate && !*bootstrapTest && !*bootstrapAuto {
+		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap-gin, -bootstrap-connect, -bootstrap-gogenerate, -bootstrap-test")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -215,6 +217,17 @@ func main() {
 		})
 		go runAgent(ctx, log, "gogenerate-agent", gg.Run)
 		fmt.Printf("conv gogenerate-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapTest {
+		ta := testagent.New(testagent.Config{
+			ID: "test-agent", ModuleRoot: absRoot,
+			Sender: sender, FSBoard: fsBoard,
+			Confirm: confirm, Print: printf,
+			Settle: 5 * time.Second,
+		})
+		go runAgent(ctx, log, "test-agent", ta.Run)
+		fmt.Printf("conv test-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
 	}
 
 	if *bootstrapAuto {
