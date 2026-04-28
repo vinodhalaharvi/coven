@@ -354,17 +354,28 @@ func makeStdinConfirm(autoConfirm bool) agent.ConfirmFunc {
 		fmt.Printf("  %s\n", bar)
 		fmt.Printf("  >>> CONFIRM: %s\n", summary)
 		fmt.Printf("  %s\n", bar)
-		fmt.Print("  run? [y/N] ")
 
-		line := readLineDirect()
-		line = strings.TrimSpace(strings.ToLower(line))
-		ok := line == "y" || line == "yes"
-		if ok {
-			fmt.Print("  → approved\n\n")
-		} else {
-			fmt.Print("  → declined\n\n")
+		// Require an EXPLICIT 'y' or 'n'. Empty input (Enter alone),
+		// stray characters, or anything ambiguous re-prompts. There is
+		// no default — the user must type an explicit character. This
+		// avoids the failure mode where a stale newline in stdin or a
+		// hasty Enter while still reading the proposal gets silently
+		// treated as a default decision.
+		for {
+			fmt.Print("  approve? type 'y' or 'n': ")
+			line := readLineDirect()
+			line = strings.TrimSpace(strings.ToLower(line))
+			switch line {
+			case "y", "yes":
+				fmt.Print("  → approved\n\n")
+				return true
+			case "n", "no":
+				fmt.Print("  → declined\n\n")
+				return false
+			default:
+				fmt.Println("  (please type 'y' or 'n' explicitly — no default)")
+			}
 		}
-		return ok
 	}
 }
 
