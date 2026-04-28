@@ -36,6 +36,7 @@ import (
 	"github.com/vinodhalaharvi/coven/dockeragent"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/ginagent"
+	"github.com/vinodhalaharvi/coven/gogenerateagent"
 	"github.com/vinodhalaharvi/coven/llm"
 	"github.com/vinodhalaharvi/coven/mainbuilder"
 	"github.com/vinodhalaharvi/coven/makefileagent"
@@ -58,8 +59,9 @@ func main() {
 		bootstrapDock = flag.Bool("bootstrap-docker", false, "wake-once: propose Dockerfile + docker-compose.yaml + .dockerignore")
 		bootstrapMake = flag.Bool("bootstrap-make", false, "wake-once: propose a starter Makefile with canonical Go-project targets")
 		bootstrapGin     = flag.Bool("bootstrap-gin", false, "steady-state: keep gin handlers in sync with sqlc data layer")
-		bootstrapConnect = flag.Bool("bootstrap-connect", false, "steady-state: keep connect-go HTTP handlers in sync with proto services")
-		bootstrapAuto    = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
+		bootstrapConnect    = flag.Bool("bootstrap-connect", false, "steady-state: keep connect-go HTTP handlers in sync with proto services")
+		bootstrapGoGenerate = flag.Bool("bootstrap-gogenerate", false, "steady-state: run //go:generate directives when their inputs change")
+		bootstrapAuto       = flag.Bool("bootstrap-auto", false, "auto-detect from go.mod: enable every registered agent whose detector fires")
 		convAuto      = flag.Bool("conv-auto", false, "skip y/N confirmation prompts (DANGEROUS)")
 		verbose   = flag.Bool("v", false, "verbose logging")
 	)
@@ -71,8 +73,8 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 
-	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapConnect && !*bootstrapAuto {
-		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap, -bootstrap-gin, -bootstrap-connect")
+	if !*convProto && !*convWire && !*convSqlc && !*convBuild && !*bootstrap && !*bootstrapDock && !*bootstrapMake && !*bootstrapGin && !*bootstrapConnect && !*bootstrapGoGenerate && !*bootstrapAuto {
+		log.Error("no agents enabled. Try -bootstrap-auto, or specific flags like -conv-proto, -bootstrap-gin, -bootstrap-connect, -bootstrap-gogenerate")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -202,6 +204,17 @@ func main() {
 		})
 		go runAgent(ctx, log, "connect-agent", ca.Run)
 		fmt.Printf("conv connect-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
+	}
+
+	if *bootstrapGoGenerate {
+		gg := gogenerateagent.New(gogenerateagent.Config{
+			ID: "gogenerate-agent", ModuleRoot: absRoot,
+			Sender: sender, FSBoard: fsBoard,
+			Confirm: confirm, Print: printf,
+			Settle: 5 * time.Second,
+		})
+		go runAgent(ctx, log, "gogenerate-agent", gg.Run)
+		fmt.Printf("conv gogenerate-agent: model=%s auto=%v (steady-state)\n", *llmModel, *convAuto)
 	}
 
 	if *bootstrapAuto {
