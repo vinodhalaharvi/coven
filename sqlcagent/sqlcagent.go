@@ -15,6 +15,7 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 const Role = `You are the sqlc agent for a Go project. Your single job is to keep generated Go code from SQL files consistent and current.
@@ -185,4 +186,33 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// init registers sqlc-agent with the v2 router. v1 cmd/demo wires this
+// up via -conv-sqlc directly; this registration is for v2 router metadata.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "sqlc",
+		Description: "regenerate sqlc Go database bindings when SQL changes",
+		TypicalTriggers: "Changes to schema/*.sql, queries/*.sql, or sqlc.yaml.",
+		DomainFiles:     "gen/db/*.go (sqlc output: db.go, models.go, *.sql.go).",
+		AvoidsWhen:      "Skip if no SQL changes (only Go code, proto, or test edits). Skip if sqlc.yaml is missing — nothing to regenerate.",
+		ExampleScenarios: "When queries/orders.sql adds a new -- name: GetOrderByCustomer query, this agent runs sqlc generate to update gen/db/orders.sql.go with the new method on Queries.",
+		Detect: func(goMod string, moduleRoot string) bool {
+			// Active when sqlc-pgx pair is present (most common combo).
+			return registry.HasDep(goMod, "github.com/jackc/pgx") ||
+				registry.HasDep(goMod, "github.com/sqlc-dev")
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "sqlc-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				FSBoard:    deps.FSBoard,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+				Settle:     1 * time.Second,
+			})
+		},
+	})
 }

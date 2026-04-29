@@ -97,6 +97,10 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "docker",
 		Description: "Dockerfile + docker-compose scaffolding",
+		TypicalTriggers: "Project missing Dockerfile or docker-compose.yaml entirely, or new entry point added that should be containerized.",
+		DomainFiles:     "Dockerfile, docker-compose.yaml, .dockerignore.",
+		AvoidsWhen:      "Skip if Dockerfile and docker-compose.yaml already exist and look correct. Don't propose changes for Go code edits, test changes, or schema-only changes.",
+		ExampleScenarios: "On a new project with cmd/server/main.go, this agent proposes a multi-stage Dockerfile (golang builder → distroless runtime) and a docker-compose.yaml with the app plus any database/redis services implied by go.mod.",
 		Detect: func(goMod string, moduleRoot string) bool {
 			// Conservative: always applicable. The role string handles
 			// "no cmd/*/, abstain" decisions.

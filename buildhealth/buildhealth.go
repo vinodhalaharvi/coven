@@ -21,6 +21,7 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 const Role = `You are the build-health agent for a Go project. Your single job is to run 'go build ./...' at the module root and report whether the project compiles end-to-end.
@@ -199,4 +200,32 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// init registers build-agent with the v2 router. v1 cmd/demo wires this
+// up via -conv-build directly; this registration is for v2 router metadata.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "build",
+		Description: "verify go build ./... passes and report drift",
+		TypicalTriggers: "Any .go file change. Acts as a cross-cutting verifier rather than a producer.",
+		DomainFiles:     "(none — build-agent is read-only; never writes files)",
+		AvoidsWhen:      "Skip when changes are limited to docs, README, or non-Go config files that can't affect compilation.",
+		ExampleScenarios: "After proto-agent regenerates *.pb.go files, this agent runs go build ./... to verify the project still compiles. If it fails with errors that point to wire_gen.go or sqlc output, the report surfaces which agent should fix it.",
+		Detect: func(goMod string, moduleRoot string) bool {
+			// Always applicable for any Go project.
+			return goMod != ""
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "build-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				FSBoard:    deps.FSBoard,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+				Settle:     3 * time.Second,
+			})
+		},
+	})
 }

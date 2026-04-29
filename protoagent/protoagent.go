@@ -23,6 +23,7 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 // Role is the system prompt that primes Claude on this agent's job.
@@ -227,4 +228,35 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// init registers proto-agent with the v2 router. v1 cmd/demo wires this
+// agent up via the -conv-proto flag directly, so registering here is
+// purely so the v2 router has metadata for routing decisions.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "proto",
+		Description: "regenerate proto Go bindings via buf and keep buf.gen.yaml aligned with go.mod deps",
+		TypicalTriggers: "Changes to .proto files, buf.yaml, or buf.gen.yaml. Also new entries in go.mod that imply new buf plugins should be configured (connectrpc.com/connect → protoc-gen-connect-go).",
+		DomainFiles:     "buf.gen.yaml, gen/<package>/v1/*.pb.go, gen/<package>/v1/*_grpc.pb.go (and connect output if configured).",
+		AvoidsWhen:      "Skip if no .proto files exist or all generated files are current. Skip changes purely in test files or non-proto source code.",
+		ExampleScenarios: "When proto/orders/v1/order.proto adds a new RPC, this agent runs buf generate to update gen/orders/v1/order.pb.go and order_grpc.pb.go (and connect bindings if configured).",
+		Detect: func(goMod string, moduleRoot string) bool {
+			// Active when proto/buf signal exists.
+			return registry.HasDep(goMod, "google.golang.org/protobuf") ||
+				registry.HasDep(goMod, "google.golang.org/grpc") ||
+				registry.HasDep(goMod, "connectrpc.com/connect")
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "proto-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				FSBoard:    deps.FSBoard,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+				Settle:     1 * time.Second,
+			})
+		},
+	})
 }

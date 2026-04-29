@@ -122,6 +122,10 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "main",
 		Description: "starter main.go for missing entry points",
+		TypicalTriggers: "Changes to wire_gen.go (new providers ready to be invoked from main), or absence of cmd/<n>/main.go when one would be expected.",
+		DomainFiles:     "cmd/<n>/main.go for each entry point.",
+		AvoidsWhen:      "Skip if all required main.go files already exist and compile. Skip changes purely to test files or generated code that doesn't affect entry-point structure.",
+		ExampleScenarios: "When wire_gen.go appears with a new InitializeApp function, this agent writes cmd/server/main.go that calls it, parses flags, sets up an HTTP server, and runs.",
 		Detect: func(goMod string, moduleRoot string) bool {
 			// mainbuilder always applies — it'll abstain if a working
 			// main already exists (per its role string).

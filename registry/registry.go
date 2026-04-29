@@ -54,6 +54,42 @@ type AgentSpec struct {
 	// Description is a one-line summary shown in help output.
 	Description string
 
+	// --- v2 router context fields ---
+	//
+	// These give the v2 router (controlplane.Router) enough information
+	// to decide whether to invoke this agent for a given diff. v1
+	// ignores them entirely. v2 reads them when constructing the
+	// router prompt.
+	//
+	// Empty values are valid; the router degrades gracefully on agents
+	// that haven't been annotated yet (treats them as best-effort
+	// candidates whenever Description matches the change). Filling
+	// these in for each agent improves routing accuracy substantially.
+
+	// TypicalTriggers describes what kinds of file changes typically
+	// wake this agent. One sentence, listing concrete examples.
+	// Example: "Changes to .proto files, buf.yaml, or buf.gen.yaml."
+	TypicalTriggers string
+
+	// DomainFiles lists the file paths or patterns this agent writes
+	// or modifies. Helps the router avoid invoking agents that
+	// wouldn't have anything to do.
+	// Example: "internal/handlers/*_service.go, internal/handlers/connect_router.go"
+	DomainFiles string
+
+	// AvoidsWhen describes situations where this agent should NOT be
+	// invoked, even if its TypicalTriggers seem to match. Helps the
+	// router make negative decisions.
+	// Example: "Skip if the only changes are inside test files."
+	AvoidsWhen string
+
+	// ExampleScenarios is one or two short examples of what this agent
+	// does end-to-end. Concrete examples help the router calibrate
+	// when its abstract description matches the situation.
+	// Example: "When a new service is added to a .proto, this agent
+	//   writes the corresponding handler stub in internal/handlers/."
+	ExampleScenarios string
+
 	// Detect inspects the go.mod content (full text) and returns true
 	// if this agent is relevant to the project. May also inspect the
 	// filesystem via moduleRoot for richer detection (e.g. presence of

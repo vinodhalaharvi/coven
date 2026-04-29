@@ -230,6 +230,10 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "gin",
 		Description: "keep gin HTTP handlers in sync with sqlc-generated data layer",
+		TypicalTriggers: "Changes to gen/db/*.sql.go (sqlc output), or new SQL queries that produce new methods on the Queries struct.",
+		DomainFiles:     "internal/handlers/*.go (REST handler files calling sqlc methods).",
+		AvoidsWhen:      "Skip if changes are limited to .proto files, generated grpc/connect code, or test files only — those don't affect REST handlers.",
+		ExampleScenarios: "When a new query is added to queries/users.sql producing Queries.GetUserByEmail, this agent writes a corresponding gin handler in internal/handlers/users.go that parses the route param, calls the new sqlc method, and returns JSON.",
 		Detect: func(goMod string, moduleRoot string) bool {
 			return registry.HasDep(goMod, "github.com/gin-gonic/gin")
 		},

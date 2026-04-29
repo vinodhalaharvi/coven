@@ -20,6 +20,7 @@ import (
 	"github.com/vinodhalaharvi/coven/algebra/blackboard"
 	"github.com/vinodhalaharvi/coven/fsmonitor"
 	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 // Role is the system prompt that primes Claude on this agent's job.
@@ -206,4 +207,31 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// init registers wire-agent with the v2 router. v1 cmd/demo wires this
+// up via -conv-wire directly; this registration is for v2 router metadata.
+func init() {
+	registry.Register(registry.AgentSpec{
+		Name:        "wire",
+		Description: "regenerate wire DI injectors when providers or wire.go changes",
+		TypicalTriggers: "Changes to wire.go (provider declarations) or new constructors / interfaces in packages that wire.go imports.",
+		DomainFiles:     "wire_gen.go (and only wire_gen.go — wire.go itself is human-authored).",
+		AvoidsWhen:      "Skip if wire.go doesn't exist in the project. Skip changes purely in test files or generated code that doesn't affect provider signatures.",
+		ExampleScenarios: "When app/services.go adds a new constructor NewBillingService, and app/wire.go is updated to include wire.NewSet(..., NewBillingService), this agent runs wire ./app/... to regenerate wire_gen.go with the new initializer.",
+		Detect: func(goMod string, moduleRoot string) bool {
+			return registry.HasDep(goMod, "github.com/google/wire")
+		},
+		Build: func(deps registry.BuildDeps) registry.Runner {
+			return New(Config{
+				ID:         "wire-agent",
+				ModuleRoot: deps.ModuleRoot,
+				Sender:     deps.Sender,
+				FSBoard:    deps.FSBoard,
+				Confirm:    deps.Confirm,
+				Print:      deps.Print,
+				Settle:     1 * time.Second,
+			})
+		},
+	})
 }
