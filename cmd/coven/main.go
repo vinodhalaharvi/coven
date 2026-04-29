@@ -63,6 +63,27 @@ import (
 	"github.com/vinodhalaharvi/coven/agent"
 	"github.com/vinodhalaharvi/coven/controlplane"
 	"github.com/vinodhalaharvi/coven/llm"
+
+	// Blank imports below cause each agent package's init() to run,
+	// which registers the agent with the registry. The router reads
+	// from registry.All() to know what agents are available.
+	//
+	// Without these imports, the registry is empty at startup and
+	// the router will return "no agents registered" for every diff.
+	//
+	// Order doesn't matter — Go runs init()s in package dependency
+	// order, but registry.Register is order-independent.
+	_ "github.com/vinodhalaharvi/coven/buildhealth"
+	_ "github.com/vinodhalaharvi/coven/connectagent"
+	_ "github.com/vinodhalaharvi/coven/dockeragent"
+	_ "github.com/vinodhalaharvi/coven/ginagent"
+	_ "github.com/vinodhalaharvi/coven/gogenerateagent"
+	_ "github.com/vinodhalaharvi/coven/mainbuilder"
+	_ "github.com/vinodhalaharvi/coven/makefileagent"
+	_ "github.com/vinodhalaharvi/coven/protoagent"
+	_ "github.com/vinodhalaharvi/coven/sqlcagent"
+	_ "github.com/vinodhalaharvi/coven/testagent"
+	_ "github.com/vinodhalaharvi/coven/wireagent"
 )
 
 func main() {
