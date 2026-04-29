@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/vinodhalaharvi/coven/agent"
 )
@@ -274,6 +275,18 @@ func (in *Integrator) logOutcome(req IntegrationRequest, result IntegrationResul
 	case OutcomeMerged:
 		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: MERGED to main as %s\n",
 			req.AgentName, short, shortSHA(result.MergeCommit)))
+		// Check if the user's working tree diverges from the new main.
+		// We use update-ref to advance main without touching the working
+		// tree (so we don't clobber uncommitted edits) — but that
+		// trade-off can leave the working tree visibly diverged from
+		// main, which is confusing if the user doesn't expect it.
+		// Print an advisory in that case.
+		if dirty, summary := in.workingTreeDivergence(); dirty {
+			in.cfg.Print("  ⚠ Your working tree differs from the new main:\n")
+			in.cfg.Print("    " + strings.ReplaceAll(strings.TrimSpace(summary), "\n", "\n    ") + "\n")
+			in.cfg.Print("    To sync your working tree to main: git checkout -- .\n")
+			in.cfg.Print("    To preserve your edits and rebase: git stash && git pull --rebase\n")
+		}
 	case OutcomeMergeConflict:
 		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: MERGE-CONFLICT — %v\n",
 			req.AgentName, short, result.MergeError))
@@ -469,6 +482,36 @@ func (in *Integrator) runGitInProject(ctx context.Context, args ...string) (stri
 	cmd.Dir = in.cfg.ProjectRoot
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// workingTreeDivergence returns true and a short summary if the
+// project's working tree differs from HEAD (i.e., the user has
+// uncommitted modifications, staged changes, or untracked files
+// the integrator's update-ref step didn't sync).
+//
+// We use 'git status --porcelain' which is stable across git versions
+// and returns one line per changed file. The summary truncates to
+// the first ~5 lines for log readability.
+func (in *Integrator) workingTreeDivergence() (bool, string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	out, err := in.runGitInProject(ctx, "status", "--porcelain")
+	if err != nil {
+		return false, ""
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		return false, ""
+	}
+
+	const maxLines = 5
+	if len(lines) > maxLines {
+		summary := strings.Join(lines[:maxLines], "\n")
+		summary += fmt.Sprintf("\n... (%d more)", len(lines)-maxLines)
+		return true, summary
+	}
+	return true, strings.Join(lines, "\n")
 }
 
 // changedFilesInBranch lists files that differ between the branch and

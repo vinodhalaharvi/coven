@@ -161,47 +161,84 @@ func (m *WorktreeMgr) Cleanup(ctx context.Context, wt *Worktree) error {
 }
 
 // CleanupOrphans removes any worktrees in .coven/worktrees/ that aren't
-// in the manager's active set. Useful at startup to recover from a
-// previous crash that left stale worktrees behind.
+// in the manager's active set, AND deletes any leftover agent-* branches
+// that no longer have a worktree. Useful at startup to recover from a
+// previous crash that left stale state behind.
+//
+// Branch cleanup: any branch matching the pattern `agent-*/...` is
+// considered an orphan if no worktree at the expected path exists. We
+// list all branches via `git branch --list 'agent-*'` and delete the
+// ones whose worktree directory is gone.
 //
 // This is safe to call when the manager is otherwise idle. Concurrent
 // Provision calls are NOT made during CleanupOrphans — caller is
 // expected to invoke this before starting agent work.
 func (m *WorktreeMgr) CleanupOrphans(ctx context.Context) error {
-	if _, err := os.Stat(m.worktreesDir); os.IsNotExist(err) {
-		return nil // nothing to clean
-	}
-
-	entries, err := os.ReadDir(m.worktreesDir)
-	if err != nil {
-		return fmt.Errorf("read worktrees dir: %w", err)
-	}
-
-	m.mu.Lock()
-	activeSnapshot := make(map[string]bool, len(m.active))
-	for path := range m.active {
-		activeSnapshot[path] = true
-	}
-	m.mu.Unlock()
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	// First, clean up orphan worktree directories.
+	if _, err := os.Stat(m.worktreesDir); !os.IsNotExist(err) {
+		entries, err := os.ReadDir(m.worktreesDir)
+		if err != nil {
+			return fmt.Errorf("read worktrees dir: %w", err)
 		}
-		path := filepath.Join(m.worktreesDir, e.Name())
-		if activeSnapshot[path] {
-			continue // belongs to an active worktree, leave it alone
+
+		m.mu.Lock()
+		activeSnapshot := make(map[string]bool, len(m.active))
+		for path := range m.active {
+			activeSnapshot[path] = true
 		}
-		if err := m.forceRemoveWorktree(ctx, path); err != nil {
-			// Log-and-continue: don't let one stuck orphan prevent
-			// cleanup of others.
-			_ = err
+		m.mu.Unlock()
+
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			path := filepath.Join(m.worktreesDir, e.Name())
+			if activeSnapshot[path] {
+				continue // belongs to an active worktree, leave it alone
+			}
+			if err := m.forceRemoveWorktree(ctx, path); err != nil {
+				// Log-and-continue: don't let one stuck orphan prevent
+				// cleanup of others.
+				_ = err
+			}
 		}
 	}
 
-	// Also prune git's worktree metadata for any paths that no longer
-	// exist on disk.
+	// Prune git's worktree metadata for any paths that no longer exist.
 	_ = m.runGit(ctx, "worktree", "prune")
+
+	// Now delete any leftover agent-* branches whose worktree directory
+	// is gone. These accumulate when previous coven runs crashed or
+	// failed mid-cycle (e.g., before the bug-fix patch landed).
+	branchOut, err := m.runGitOutput(ctx, "branch", "--list", "agent-*/*")
+	if err == nil {
+		for _, line := range strings.Split(branchOut, "\n") {
+			line = strings.TrimSpace(line)
+			line = strings.TrimPrefix(line, "* ") // drop the active marker
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// Branch name is `agent-<agent>/<uuid>`. The corresponding
+			// worktree path is .coven/worktrees/<agent>-<uuid>/.
+			// Convert by replacing the slash with a dash.
+			// `agent-test/abc123` → `test-abc123`
+			rest := strings.TrimPrefix(line, "agent-")
+			if rest == line {
+				continue // doesn't match agent- prefix; safety
+			}
+			parts := strings.SplitN(rest, "/", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			expectedDir := filepath.Join(m.worktreesDir, parts[0]+"-"+parts[1])
+			if _, statErr := os.Stat(expectedDir); !os.IsNotExist(statErr) {
+				continue // worktree still exists, branch is in use
+			}
+			// Worktree dir is gone — branch is an orphan. Delete it.
+			_ = m.runGit(ctx, "branch", "-D", line)
+		}
+	}
 
 	return nil
 }
@@ -278,6 +315,16 @@ func (m *WorktreeMgr) runGit(ctx context.Context, args ...string) error {
 		return fmt.Errorf("%w: git %s: %s", err, strings.Join(args, " "), strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// runGitOutput runs git in the project root and returns the combined
+// stdout+stderr. Used when the caller needs to parse the output (e.g.
+// 'git branch --list' for orphan detection).
+func (m *WorktreeMgr) runGitOutput(ctx context.Context, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = m.projectRoot
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // newShortUUID returns 8 hex characters of randomness. Long enough to
