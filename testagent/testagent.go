@@ -219,6 +219,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "test",
 		Description: "scaffold tests for public functions and verify go test passes",
+		Role:        Role,
 		TypicalTriggers: "New public functions added without corresponding tests, or existing test files referencing changed function signatures.",
 		DomainFiles:     "*_test.go files anywhere in the project.",
 		AvoidsWhen:      "Skip if all public functions already have tests AND go test passes. Skip changes that are purely cosmetic (whitespace, comments) or limited to generated code in gen/.",

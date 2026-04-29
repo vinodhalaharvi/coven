@@ -213,6 +213,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "gogenerate",
 		Description: "run //go:generate directives when their inputs change",
+		Role:        Role,
 		TypicalTriggers: "Changes to .go source files containing //go:generate directives, OR changes to source files that those directives reference as inputs (e.g., interface definitions whose mocks need regeneration).",
 		DomainFiles:     "Generated outputs of //go:generate directives — varies per project (mocks/, _string.go from stringer, etc.).",
 		AvoidsWhen:      "Skip if no //go:generate directives exist in the project. Skip directives that belong to specialized agents (buf generate → proto-agent, sqlc generate → sqlc-agent, wire ./pkg → wire-agent).",

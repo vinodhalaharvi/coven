@@ -122,6 +122,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "main",
 		Description: "starter main.go for missing entry points",
+		Role:        Role,
 		TypicalTriggers: "Changes to wire_gen.go (new providers ready to be invoked from main), or absence of cmd/<n>/main.go when one would be expected.",
 		DomainFiles:     "cmd/<n>/main.go for each entry point.",
 		AvoidsWhen:      "Skip if all required main.go files already exist and compile. Skip changes purely to test files or generated code that doesn't affect entry-point structure.",

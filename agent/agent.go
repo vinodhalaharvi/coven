@@ -38,20 +38,56 @@ type Tool struct {
 
 // ConfirmFunc gates execution of mutating tools. Returns true to allow.
 // The default is os.Stdin-based; tests inject a fake.
+//
+// In v1 this is the only gate. In v2 the controlplane installs a
+// PreConfirm hook that runs first; ConfirmFunc only fires for tool
+// calls PreConfirm chose to defer to the user.
 type ConfirmFunc func(ctx context.Context, toolName, summary string) bool
+
+// PreConfirmDecision is what a PreConfirm hook returns.
+type PreConfirmDecision int
+
+const (
+	// PreConfirmAsk means: defer to ConfirmFunc (the user-facing prompt).
+	// Default path for tool calls the pre-confirm hook doesn't have an
+	// opinion about.
+	PreConfirmAsk PreConfirmDecision = iota
+
+	// PreConfirmAllow means: skip the user prompt entirely; this tool
+	// call is approved by policy. Used by the v2 allow-list to silence
+	// routine operations like 'go build', 'cat > file', 'buf generate'.
+	PreConfirmAllow
+
+	// PreConfirmDeny means: reject this tool call without asking the
+	// user. Returned content goes back to the LLM as a tool error.
+	// Reserved for future "block this kind of command always" policies.
+	PreConfirmDeny
+)
+
+// PreConfirmFunc is an optional policy hook that fires before the user
+// prompt for mutating tools. It receives the raw ToolUseBlock so it
+// can inspect the actual tool input (e.g., the shell command string)
+// rather than the truncated summary the user would see.
+//
+// Returns PreConfirmAsk to delegate to ConfirmFunc, PreConfirmAllow to
+// approve silently, or PreConfirmDeny to reject without asking.
+//
+// Nil PreConfirm = always Ask (i.e., v1 behavior preserved).
+type PreConfirmFunc func(ctx context.Context, use *llm.ToolUseBlock) PreConfirmDecision
 
 // PrintFunc is how the agent communicates with the user. Defaults to fmt.Print.
 type PrintFunc func(string)
 
 // Config configures a ConversationalAgent.
 type Config struct {
-	ID       string         // stable identifier, used in fact keys and logs
-	Role     string         // hardcoded system prompt fragment ("I am the proto agent...")
-	Tools    []Tool         // toolbox; must include all tools the role might need
-	Sender   llm.Sender     // backend
-	Confirm  ConfirmFunc    // gate on mutating tools; nil = always deny (safe default)
-	Print    PrintFunc      // user output; nil = fmt.Print
-	MaxTurns int            // safety cap on conversation turns per wakeup; default 30
+	ID         string         // stable identifier, used in fact keys and logs
+	Role       string         // hardcoded system prompt fragment ("I am the proto agent...")
+	Tools      []Tool         // toolbox; must include all tools the role might need
+	Sender     llm.Sender     // backend
+	Confirm    ConfirmFunc    // gate on mutating tools; nil = always deny (safe default)
+	PreConfirm PreConfirmFunc // optional v2 policy hook; runs before Confirm. Nil = v1 behavior.
+	Print      PrintFunc      // user output; nil = fmt.Print
+	MaxTurns   int            // safety cap on conversation turns per wakeup; default 30
 }
 
 // Agent is a long-lived conversational agent.
@@ -168,9 +204,28 @@ func (a *Agent) runTool(ctx context.Context, use *llm.ToolUseBlock) (string, boo
 
 	// Confirmation gate for mutating tools.
 	if !tool.Pure {
-		summary := summarizeToolCall(use)
-		if !a.cfg.Confirm(ctx, use.Name, summary) {
-			return "user denied execution of " + use.Name, true
+		approved := false
+
+		// v2 policy hook fires first if installed.
+		if a.cfg.PreConfirm != nil {
+			switch a.cfg.PreConfirm(ctx, use) {
+			case PreConfirmAllow:
+				// Approved by policy — log via Print (so user can see
+				// what's happening) but skip the y/n prompt.
+				a.cfg.Print(fmt.Sprintf("  [%s] auto-approved: %s\n", a.cfg.ID, summarizeToolCall(use)))
+				approved = true
+			case PreConfirmDeny:
+				return "policy denied execution of " + use.Name, true
+			case PreConfirmAsk:
+				// Fall through to ConfirmFunc below.
+			}
+		}
+
+		if !approved {
+			summary := summarizeToolCall(use)
+			if !a.cfg.Confirm(ctx, use.Name, summary) {
+				return "user denied execution of " + use.Name, true
+			}
 		}
 	}
 

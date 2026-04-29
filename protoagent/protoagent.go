@@ -237,6 +237,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "proto",
 		Description: "regenerate proto Go bindings via buf and keep buf.gen.yaml aligned with go.mod deps",
+		Role:        Role,
 		TypicalTriggers: "Changes to .proto files, buf.yaml, or buf.gen.yaml. Also new entries in go.mod that imply new buf plugins should be configured (connectrpc.com/connect → protoc-gen-connect-go).",
 		DomainFiles:     "buf.gen.yaml, gen/<package>/v1/*.pb.go, gen/<package>/v1/*_grpc.pb.go (and connect output if configured).",
 		AvoidsWhen:      "Skip if no .proto files exist or all generated files are current. Skip changes purely in test files or non-proto source code.",

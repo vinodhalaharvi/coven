@@ -387,3 +387,259 @@ func TestAgent_GoroutineSafe(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// neverConfirm is a ConfirmFunc that always denies. Used to verify that
+// PreConfirmAllow really skips the user prompt — if it doesn't, this
+// would deny.
+func neverConfirm(context.Context, string, string) bool { return false }
+
+// TestAgent_PreConfirmAllow_SkipsUserConfirm verifies the v2 policy hook:
+// PreConfirmAllow lets a tool call run without invoking ConfirmFunc.
+//
+// We set Confirm = neverConfirm to prove the user prompt was skipped —
+// if it had been called, the tool wouldn't have run.
+func TestAgent_PreConfirmAllow_SkipsUserConfirm(t *testing.T) {
+	called := 0
+	execTool := Tool{
+		Pure: false,
+		Spec: llm.ToolSpec{
+			Name:        "exec",
+			Description: "run a command",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Run: func(ctx context.Context, input map[string]any) (string, error) {
+			called++
+			return "ran", nil
+		},
+	}
+
+	preConfirmCalls := 0
+	preConfirm := func(ctx context.Context, use *llm.ToolUseBlock) PreConfirmDecision {
+		preConfirmCalls++
+		return PreConfirmAllow
+	}
+
+	a := New(Config{
+		ID:    "test",
+		Tools: []Tool{execTool},
+		Sender: llm.ScriptedSender(
+			llm.ToolUseResponse("exec", map[string]any{"command": "go build"}, "u1"),
+			llm.TextResponse("ok"),
+		),
+		Print:      silentPrint,
+		Confirm:    neverConfirm, // would deny if ever called
+		PreConfirm: preConfirm,
+	})
+
+	_, err := a.Wake(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preConfirmCalls != 1 {
+		t.Errorf("PreConfirm calls = %d, want 1", preConfirmCalls)
+	}
+	if called != 1 {
+		t.Errorf("tool calls = %d, want 1 (PreConfirmAllow should let it through)", called)
+	}
+}
+
+// TestAgent_PreConfirmDeny_SkipsBothToolAndConfirm verifies that
+// PreConfirmDeny rejects the tool without prompting the user.
+func TestAgent_PreConfirmDeny_SkipsBothToolAndConfirm(t *testing.T) {
+	called := 0
+	execTool := Tool{
+		Pure: false,
+		Spec: llm.ToolSpec{
+			Name:        "exec",
+			Description: "run a command",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Run: func(ctx context.Context, input map[string]any) (string, error) {
+			called++
+			return "ran", nil
+		},
+	}
+
+	confirmCalls := 0
+	confirm := func(ctx context.Context, name, summary string) bool {
+		confirmCalls++
+		return true
+	}
+
+	preConfirm := func(ctx context.Context, use *llm.ToolUseBlock) PreConfirmDecision {
+		return PreConfirmDeny
+	}
+
+	a := New(Config{
+		ID:    "test",
+		Tools: []Tool{execTool},
+		Sender: llm.ScriptedSender(
+			llm.ToolUseResponse("exec", map[string]any{"command": "rm -rf /"}, "u1"),
+			llm.TextResponse("denied"),
+		),
+		Print:      silentPrint,
+		Confirm:    confirm,
+		PreConfirm: preConfirm,
+	})
+
+	_, err := a.Wake(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmCalls != 0 {
+		t.Errorf("Confirm should not have been called, got %d calls", confirmCalls)
+	}
+	if called != 0 {
+		t.Errorf("Tool should not have run, got %d calls", called)
+	}
+}
+
+// TestAgent_PreConfirmAsk_FallsThroughToConfirm verifies the default
+// path: PreConfirmAsk delegates to ConfirmFunc.
+func TestAgent_PreConfirmAsk_FallsThroughToConfirm(t *testing.T) {
+	called := 0
+	execTool := Tool{
+		Pure: false,
+		Spec: llm.ToolSpec{
+			Name:        "exec",
+			Description: "run a command",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Run: func(ctx context.Context, input map[string]any) (string, error) {
+			called++
+			return "ran", nil
+		},
+	}
+
+	confirmCalls := 0
+	confirm := func(ctx context.Context, name, summary string) bool {
+		confirmCalls++
+		return true
+	}
+
+	preConfirm := func(ctx context.Context, use *llm.ToolUseBlock) PreConfirmDecision {
+		return PreConfirmAsk
+	}
+
+	a := New(Config{
+		ID:    "test",
+		Tools: []Tool{execTool},
+		Sender: llm.ScriptedSender(
+			llm.ToolUseResponse("exec", map[string]any{"command": "unusual-tool foo"}, "u1"),
+			llm.TextResponse("ok"),
+		),
+		Print:      silentPrint,
+		Confirm:    confirm,
+		PreConfirm: preConfirm,
+	})
+
+	_, err := a.Wake(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmCalls != 1 {
+		t.Errorf("Confirm should have been called once, got %d", confirmCalls)
+	}
+	if called != 1 {
+		t.Errorf("Tool should have run after Confirm approval, got %d calls", called)
+	}
+}
+
+// TestAgent_PreConfirmNil_PreservesV1Behavior ensures that without a
+// PreConfirm hook, the agent behaves exactly as v1: every mutating
+// tool goes to ConfirmFunc.
+func TestAgent_PreConfirmNil_PreservesV1Behavior(t *testing.T) {
+	called := 0
+	execTool := Tool{
+		Pure: false,
+		Spec: llm.ToolSpec{
+			Name:        "exec",
+			Description: "run a command",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Run: func(ctx context.Context, input map[string]any) (string, error) {
+			called++
+			return "ran", nil
+		},
+	}
+
+	confirmCalls := 0
+	confirm := func(ctx context.Context, name, summary string) bool {
+		confirmCalls++
+		return true
+	}
+
+	a := New(Config{
+		ID:    "test",
+		Tools: []Tool{execTool},
+		Sender: llm.ScriptedSender(
+			llm.ToolUseResponse("exec", map[string]any{"command": "go build"}, "u1"),
+			llm.TextResponse("ok"),
+		),
+		Print:   silentPrint,
+		Confirm: confirm,
+		// PreConfirm: nil
+	})
+
+	_, err := a.Wake(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmCalls != 1 {
+		t.Errorf("Without PreConfirm, Confirm should fire once; got %d", confirmCalls)
+	}
+	if called != 1 {
+		t.Errorf("tool calls = %d, want 1", called)
+	}
+}
+
+// TestAgent_PreConfirm_ReceivesRawToolUse verifies the hook gets the
+// actual ToolUseBlock with input map intact, not a stringified summary.
+// This is what makes the v2 allow-list possible — it needs to inspect
+// the raw command string, not a truncated summary.
+func TestAgent_PreConfirm_ReceivesRawToolUse(t *testing.T) {
+	execTool := Tool{
+		Pure: false,
+		Spec: llm.ToolSpec{
+			Name:        "exec",
+			Description: "run a command",
+			InputSchema: map[string]any{"type": "object"},
+		},
+		Run: func(ctx context.Context, input map[string]any) (string, error) {
+			return "ran", nil
+		},
+	}
+
+	var receivedUse *llm.ToolUseBlock
+	preConfirm := func(ctx context.Context, use *llm.ToolUseBlock) PreConfirmDecision {
+		receivedUse = use
+		return PreConfirmAllow
+	}
+
+	a := New(Config{
+		ID:    "test",
+		Tools: []Tool{execTool},
+		Sender: llm.ScriptedSender(
+			llm.ToolUseResponse("exec", map[string]any{"command": "go build ./...", "reason": "verify"}, "u1"),
+			llm.TextResponse("ok"),
+		),
+		Print:      silentPrint,
+		Confirm:    alwaysConfirm,
+		PreConfirm: preConfirm,
+	})
+
+	_, err := a.Wake(context.Background(), "go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receivedUse == nil {
+		t.Fatal("PreConfirm did not receive a ToolUseBlock")
+	}
+	if receivedUse.Name != "exec" {
+		t.Errorf("Name = %q, want exec", receivedUse.Name)
+	}
+	cmd, _ := receivedUse.Input["command"].(string)
+	if cmd != "go build ./..." {
+		t.Errorf("input[command] = %q, want 'go build ./...'", cmd)
+	}
+}

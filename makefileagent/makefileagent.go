@@ -96,6 +96,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "make",
 		Description: "starter Makefile with canonical Go targets",
+		Role:        Role,
 		TypicalTriggers: "Project missing Makefile, or existing Makefile lacks targets for the project's actual toolchain (e.g., has no buf-generate target despite buf.yaml present).",
 		DomainFiles:     "Makefile.",
 		AvoidsWhen:      "Skip if Makefile already exists with appropriate targets. Don't run for Go source changes, schema changes, or test edits.",

@@ -208,6 +208,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "build",
 		Description: "verify go build ./... passes and report drift",
+		Role:        Role,
 		TypicalTriggers: "Any .go file change. Acts as a cross-cutting verifier rather than a producer.",
 		DomainFiles:     "(none — build-agent is read-only; never writes files)",
 		AvoidsWhen:      "Skip when changes are limited to docs, README, or non-Go config files that can't affect compilation.",

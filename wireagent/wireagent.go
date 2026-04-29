@@ -215,6 +215,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "wire",
 		Description: "regenerate wire DI injectors when providers or wire.go changes",
+		Role:        Role,
 		TypicalTriggers: "Changes to wire.go (provider declarations) or new constructors / interfaces in packages that wire.go imports.",
 		DomainFiles:     "wire_gen.go (and only wire_gen.go — wire.go itself is human-authored).",
 		AvoidsWhen:      "Skip if wire.go doesn't exist in the project. Skip changes purely in test files or generated code that doesn't affect provider signatures.",

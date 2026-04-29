@@ -194,6 +194,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "sqlc",
 		Description: "regenerate sqlc Go database bindings when SQL changes",
+		Role:        Role,
 		TypicalTriggers: "Changes to schema/*.sql, queries/*.sql, or sqlc.yaml.",
 		DomainFiles:     "gen/db/*.go (sqlc output: db.go, models.go, *.sql.go).",
 		AvoidsWhen:      "Skip if no SQL changes (only Go code, proto, or test edits). Skip if sqlc.yaml is missing — nothing to regenerate.",

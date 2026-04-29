@@ -262,6 +262,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "connect",
 		Description: "wire connect-go HTTP handlers from proto-defined services",
+		Role:        Role,
 		TypicalTriggers: "Changes to gen/<service>/v1/<n>connect/*.go (connect codegen output), or new proto services being defined that connect plugin will produce bindings for.",
 		DomainFiles:     "internal/handlers/<svc>_service.go (per-service implementations) and internal/handlers/connect_router.go (RegisterConnectHandlers function).",
 		AvoidsWhen:      "Skip if no proto-generated *_connect.pb.go (or similar) files exist yet — that's proto-agent's job to produce them. Also skip when changes are limited to gin REST handlers or sqlc data layer.",

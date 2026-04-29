@@ -97,6 +97,7 @@ func init() {
 	registry.Register(registry.AgentSpec{
 		Name:        "docker",
 		Description: "Dockerfile + docker-compose scaffolding",
+		Role:        Role,
 		TypicalTriggers: "Project missing Dockerfile or docker-compose.yaml entirely, or new entry point added that should be containerized.",
 		DomainFiles:     "Dockerfile, docker-compose.yaml, .dockerignore.",
 		AvoidsWhen:      "Skip if Dockerfile and docker-compose.yaml already exist and look correct. Don't propose changes for Go code edits, test changes, or schema-only changes.",

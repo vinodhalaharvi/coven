@@ -54,6 +54,16 @@ type AgentSpec struct {
 	// Description is a one-line summary shown in help output.
 	Description string
 
+	// Role is the system prompt fragment that primes Claude on this
+	// agent's job. v2's task adapter uses this to construct a fresh
+	// agent.Agent for each task invocation. v1 ignores it (each agent
+	// package wires its own Role into agent.Config directly via Build).
+	//
+	// Empty Role is valid for agents that won't be invoked via v2's
+	// task adapter — but currently every agent should set this so the
+	// router can dispatch to it.
+	Role string
+
 	// --- v2 router context fields ---
 	//
 	// These give the v2 router (controlplane.Router) enough information
