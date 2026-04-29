@@ -259,9 +259,65 @@ func (in *Integrator) Run(ctx context.Context, q *IntegrationQueue) error {
 			return err
 		}
 		result := in.Process(ctx, req)
-		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: %s\n",
-			req.AgentName, shortBranch(req.Branch), result.Outcome))
+		in.logOutcome(req, result)
 	}
+}
+
+// logOutcome emits a verbose log line describing what happened to a
+// merge request. Called by Run after every Process. Verbose because
+// the integrator is the trickiest part of v2 — when something goes
+// wrong, we want enough information in the log to diagnose it
+// without running again with extra logging enabled.
+func (in *Integrator) logOutcome(req IntegrationRequest, result IntegrationResult) {
+	short := shortBranch(req.Branch)
+	switch result.Outcome {
+	case OutcomeMerged:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: MERGED to main as %s\n",
+			req.AgentName, short, shortSHA(result.MergeCommit)))
+	case OutcomeMergeConflict:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: MERGE-CONFLICT — %v\n",
+			req.AgentName, short, result.MergeError))
+		if len(result.RepairAttempts) > 0 {
+			in.cfg.Print(fmt.Sprintf("  (repair attempts: %d)\n", len(result.RepairAttempts)))
+			for i, ra := range result.RepairAttempts {
+				if ra.Err != nil {
+					in.cfg.Print(fmt.Sprintf("  attempt %d: %v\n", i+1, ra.Err))
+				}
+			}
+		}
+	case OutcomeValidatorFailed:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: VALIDATOR-FAILED\n",
+			req.AgentName, short))
+		for _, vr := range result.ValidatorResults {
+			if !vr.Passed() {
+				in.cfg.Print(fmt.Sprintf("  [%s] failed: %v\n", vr.Validator.Name, vr.Err))
+				if vr.Output != "" {
+					trimmed := strings.TrimSpace(vr.Output)
+					if len(trimmed) > 500 {
+						trimmed = trimmed[:500] + "...(truncated)"
+					}
+					in.cfg.Print(fmt.Sprintf("    %s\n", strings.ReplaceAll(trimmed, "\n", "\n    ")))
+				}
+			}
+		}
+	case OutcomeUserDeclined:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: USER-DECLINED\n",
+			req.AgentName, short))
+	case OutcomeError:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: ERROR — %v\n",
+			req.AgentName, short, result.MergeError))
+	default:
+		in.cfg.Print(fmt.Sprintf("[integrator] %s/%s: %s\n",
+			req.AgentName, short, result.Outcome))
+	}
+}
+
+// shortSHA returns the first 8 chars of a git SHA for log readability.
+func shortSHA(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 // Process handles one integration request end-to-end. Public so tests
@@ -361,12 +417,27 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 	mergeCommit := strings.TrimSpace(mergeCommitOut)
 	result.MergeCommit = mergeCommit
 
-	// Fast-forward main in the project root to the merge commit.
-	// This works because the temp worktree is on a branch that's
-	// main + the agent's changes — main is an ancestor of HEAD.
-	if _, err := in.runGitInProject(ctx, "merge", "--ff-only", mergeCommit); err != nil {
+	// Fast-forward main to the merge commit by directly updating the
+	// branch pointer. We DON'T use 'git merge --ff-only' from the
+	// project root because that touches the working tree — and if the
+	// user has uncommitted changes (which is the common case in coven,
+	// since they're actively editing files), git refuses the merge.
+	//
+	// 'git update-ref' moves the branch pointer without touching the
+	// working tree. The user's uncommitted edits stay exactly as they
+	// are. Their next 'git status' will show their edits relative to
+	// the new main (which now includes the agent's resolution), but
+	// that's the correct behavior — it surfaces any divergence for
+	// the user to handle.
+	//
+	// We also need to handle the case where the project root's HEAD
+	// is currently checked out as the temp worktree's parent — i.e.,
+	// the agent's branch was based on main, and main is at the same
+	// commit as the temp worktree's parent. In that case, update-ref
+	// is fine.
+	if _, err := in.runGitInProject(ctx, "update-ref", "refs/heads/main", mergeCommit); err != nil {
 		result.Outcome = OutcomeError
-		result.MergeError = fmt.Errorf("fast-forward main: %w", err)
+		result.MergeError = fmt.Errorf("update-ref refs/heads/main: %w", err)
 		return result
 	}
 

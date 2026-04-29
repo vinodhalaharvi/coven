@@ -29,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -128,10 +129,11 @@ func (cp *controlPlane) Run(ctx context.Context) error {
 	fsErr := make(chan error, 1)
 	go func() {
 		fsErr <- fsmonitor.Run(fsCtx, fsmonitor.Config{
-			Root:     cp.cfg.ProjectRoot,
-			Debounce: 200 * time.Millisecond,
-			Board:    cp.fsBoard,
-			Author:   "controlplane",
+			Root:       cp.cfg.ProjectRoot,
+			Debounce:   200 * time.Millisecond,
+			IgnoreFile: ignoreInternalPaths(cp.cfg.ProjectRoot),
+			Board:      cp.fsBoard,
+			Author:     "controlplane",
 		})
 	}()
 
@@ -308,6 +310,12 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why str
 // "intent to add" mode that doesn't actually stage content but causes
 // `git diff HEAD` to show new files. Side-effect-free from the user's
 // perspective.
+//
+// Binary file diffs are stripped from the output. git represents them
+// as 4-line blocks ending in "Binary files ... differ" — these are
+// useless to the router (Claude can't reason about binary content)
+// and add noise to routing decisions. We keep the file-presence
+// information by leaving a one-line marker.
 func buildDiff(ctx context.Context, projectRoot string) (string, error) {
 	// Stage intent-to-add for untracked files.
 	if err := runGitAtRoot(ctx, projectRoot, "add", "-N", "."); err != nil {
@@ -318,7 +326,77 @@ func buildDiff(ctx context.Context, projectRoot string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git diff HEAD: %w", err)
 	}
-	return out, nil
+	return stripBinaryDiffs(out), nil
+}
+
+// stripBinaryDiffs removes the file-diff blocks that represent binary
+// content from a unified diff. Replaces each one with a one-line
+// summary so the router still knows the file changed.
+//
+// A binary diff block in git output looks like:
+//
+//	diff --git a/path b/path
+//	new file mode 100755
+//	index 0000000..0fdd330
+//	Binary files /dev/null and b/path differ
+//
+// The 4th line is the giveaway. We detect blocks ending in
+// "Binary files ... differ" and replace them with:
+//
+//	diff --git a/path b/path
+//	[binary file change suppressed]
+//
+// preserving the file-list signal but dropping content the router
+// can't use.
+func stripBinaryDiffs(diff string) string {
+	if !strings.Contains(diff, "Binary files") {
+		return diff
+	}
+
+	var out strings.Builder
+	var blockStart int = -1
+	lines := strings.Split(diff, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "diff --git ") {
+			// Flush pending block if it wasn't binary.
+			if blockStart >= 0 {
+				for _, prev := range lines[blockStart:i] {
+					out.WriteString(prev)
+					out.WriteString("\n")
+				}
+			}
+			blockStart = i
+			continue
+		}
+		if blockStart >= 0 && strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") {
+			// This block is binary — write the diff header + marker, skip rest.
+			out.WriteString(lines[blockStart])
+			out.WriteString("\n")
+			out.WriteString("[binary file change suppressed]\n")
+			// Find the next diff --git or end of input.
+			for j := i + 1; j < len(lines); j++ {
+				if strings.HasPrefix(lines[j], "diff --git ") {
+					blockStart = j
+					break
+				}
+				if j == len(lines)-1 {
+					blockStart = -1
+				}
+			}
+			// If we reached end without finding another diff, blockStart=-1.
+			// Otherwise blockStart points at the next diff header, which we'll
+			// process on the next iteration. Skip ahead.
+			continue
+		}
+	}
+	// Flush any remaining non-binary block.
+	if blockStart >= 0 {
+		for _, line := range lines[blockStart:] {
+			out.WriteString(line)
+			out.WriteString("\n")
+		}
+	}
+	return out.String()
 }
 
 // getHeadSHA returns the current HEAD commit SHA at the project root.
@@ -370,6 +448,37 @@ func truncateLog(s string, max int) string {
 		return s
 	}
 	return s[:max] + "..."
+}
+
+// ignoreInternalPaths returns an fsmonitor.IgnoreFile predicate that
+// suppresses events for paths coven itself manages.
+//
+// Without this filter, agents writing files inside their worktrees
+// (.coven/worktrees/<agent>-<uuid>/...) would fire fsnotify events
+// that propagate to the dispatcher, triggering routing on coven's
+// own internal activity. That creates infinite-loop hazards in
+// cascades.
+//
+// We ignore:
+//   - everything under <project>/.coven/ (worktrees and any future
+//     internal state)
+//   - .git/ (git's internal files; not normally written during
+//     normal operation but defensive)
+//
+// The predicate receives absolute paths. The check is a string-prefix
+// match against the absolute project root + "/.coven" (or "/.git").
+func ignoreInternalPaths(projectRoot string) func(string) bool {
+	covenInternal := projectRoot + string(os.PathSeparator) + ".coven"
+	gitInternal := projectRoot + string(os.PathSeparator) + ".git"
+	return func(absPath string) bool {
+		if strings.HasPrefix(absPath, covenInternal) {
+			return true
+		}
+		if strings.HasPrefix(absPath, gitInternal) {
+			return true
+		}
+		return false
+	}
 }
 
 // withDefaults populates Config zero values with sensible defaults.

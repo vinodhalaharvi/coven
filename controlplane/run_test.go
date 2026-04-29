@@ -230,3 +230,108 @@ func TestDispatchLoop_DebounceCoalescesEvents(t *testing.T) {
 	// without crashing.
 	t.Skip("end-to-end debounce coverage deferred to session 8 (real project test)")
 }
+
+func TestStripBinaryDiffs(t *testing.T) {
+	cases := map[string]struct {
+		input string
+		check func(t *testing.T, output string)
+	}{
+		"no binaries — output unchanged": {
+			input: `diff --git a/main.go b/main.go
+index abc..def 100644
+--- a/main.go
++++ b/main.go
+@@ -1 +1 @@
+-old
++new
+`,
+			check: func(t *testing.T, output string) {
+				if !strings.Contains(output, "+new") {
+					t.Error("text content was lost")
+				}
+				if strings.Contains(output, "[binary file change suppressed]") {
+					t.Error("non-binary diff was incorrectly marked as suppressed")
+				}
+			},
+		},
+		"single binary file": {
+			input: `diff --git a/hello b/hello
+new file mode 100755
+index 0000000..0fdd330
+Binary files /dev/null and b/hello differ
+`,
+			check: func(t *testing.T, output string) {
+				if !strings.Contains(output, "diff --git a/hello b/hello") {
+					t.Error("file header was lost")
+				}
+				if !strings.Contains(output, "[binary file change suppressed]") {
+					t.Error("binary file marker not added")
+				}
+				if strings.Contains(output, "Binary files") {
+					t.Error("binary file diff content leaked through")
+				}
+			},
+		},
+		"mixed binary and text": {
+			input: `diff --git a/main.go b/main.go
+--- a/main.go
++++ b/main.go
+@@ -1 +1 @@
+-old
++new
+diff --git a/binary b/binary
+new file mode 100755
+index 0000..ffff
+Binary files /dev/null and b/binary differ
+diff --git a/other.go b/other.go
+--- a/other.go
++++ b/other.go
+@@ -1 +1 @@
+-foo
++bar
+`,
+			check: func(t *testing.T, output string) {
+				if !strings.Contains(output, "+new") {
+					t.Error("text changes to main.go were lost")
+				}
+				if !strings.Contains(output, "+bar") {
+					t.Error("text changes to other.go were lost")
+				}
+				if !strings.Contains(output, "[binary file change suppressed]") {
+					t.Error("binary marker not added")
+				}
+				if strings.Contains(output, "Binary files") {
+					t.Error("binary content leaked through")
+				}
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tc.check(t, stripBinaryDiffs(tc.input))
+		})
+	}
+}
+
+func TestIgnoreInternalPaths(t *testing.T) {
+	predicate := ignoreInternalPaths("/home/user/project")
+
+	cases := map[string]bool{
+		"/home/user/project/main.go":                                        false,
+		"/home/user/project/internal/foo.go":                                false,
+		"/home/user/project/.coven/worktrees/test-abc/main.go":              true,
+		"/home/user/project/.coven/some-other-state.json":                   true,
+		"/home/user/project/.git/HEAD":                                      true,
+		"/home/user/project/.git/objects/ab/cdef":                           true,
+		"/home/user/project/coven.go":                                       false, // not .coven
+		"/home/user/project/git.go":                                         false, // not .git
+	}
+	for path, expected := range cases {
+		t.Run(path, func(t *testing.T) {
+			got := predicate(path)
+			if got != expected {
+				t.Errorf("ignoreInternalPaths(%q) = %v, want %v", path, got, expected)
+			}
+		})
+	}
+}
