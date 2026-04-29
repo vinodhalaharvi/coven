@@ -87,6 +87,12 @@ type IntegrationResult struct {
 	// MergeCommit is the SHA of the resulting merge commit on main,
 	// populated on OutcomeMerged.
 	MergeCommit string
+
+	// RepairAttempts captures any LLM repair rounds that ran during
+	// this integration. Empty for clean merges; populated when
+	// repair was invoked (whether successful or not). Useful for
+	// observability and the requeue payload.
+	RepairAttempts []RepairResult
 }
 
 // IntegrationOutcome enumerates the possible end-states of a merge
@@ -204,6 +210,12 @@ type IntegratorConfig struct {
 
 	// Print is user-facing output. nil means fmt.Print.
 	Print agent.PrintFunc
+
+	// Repair (optional) enables LLM-mediated repair of merge conflicts
+	// and validator failures. nil = no repair (6a behavior). When
+	// set, the integrator will attempt repair before returning a
+	// failure outcome.
+	Repair *RepairConfig
 }
 
 // Integrator drains an IntegrationQueue serially, attempting merges
@@ -281,15 +293,32 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 		// otherwise it's a different kind of error.
 		statusOut, _ := in.runGitInWorktree(ctx, tempWt.Path, "status", "--porcelain")
 		if hasUnmergedPaths(statusOut) {
-			result.Outcome = OutcomeMergeConflict
-			result.MergeError = fmt.Errorf("merge conflict: %s", strings.TrimSpace(mergeOut))
-			// Reset the temp worktree for clean shutdown.
-			_, _ = in.runGitInWorktree(ctx, tempWt.Path, "merge", "--abort")
+			// Try LLM repair if configured.
+			if in.cfg.Repair != nil {
+				repaired, repairErr := in.tryConflictRepair(ctx, tempWt.Path, &result)
+				if repairErr == nil && repaired {
+					// Conflict resolved + committed. Fall through to
+					// the validators step below — same as a clean
+					// merge would.
+				} else {
+					result.Outcome = OutcomeMergeConflict
+					result.MergeError = fmt.Errorf("merge conflict (repair %s): %s",
+						conflictRepairStatus(repairErr, repaired),
+						strings.TrimSpace(mergeOut))
+					_, _ = in.runGitInWorktree(ctx, tempWt.Path, "merge", "--abort")
+					return result
+				}
+			} else {
+				result.Outcome = OutcomeMergeConflict
+				result.MergeError = fmt.Errorf("merge conflict: %s", strings.TrimSpace(mergeOut))
+				_, _ = in.runGitInWorktree(ctx, tempWt.Path, "merge", "--abort")
+				return result
+			}
 		} else {
 			result.Outcome = OutcomeError
 			result.MergeError = fmt.Errorf("merge failed: %w: %s", mergeErr, strings.TrimSpace(mergeOut))
+			return result
 		}
-		return result
 	}
 
 	// 3. Run validators against the merged tree.
@@ -297,8 +326,19 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 	results := in.cfg.Validators.RunAll(ctx, tempWt.Path, changed)
 	result.ValidatorResults = results
 	if AnyFailed(results) {
-		result.Outcome = OutcomeValidatorFailed
-		return result
+		// Try LLM repair if configured.
+		if in.cfg.Repair != nil {
+			repaired := in.tryValidatorRepair(ctx, tempWt.Path, results, changed, &result)
+			if !repaired {
+				result.Outcome = OutcomeValidatorFailed
+				return result
+			}
+			// Repair succeeded; results were updated in-place.
+			result.ValidatorResults = results // capture the post-repair results too
+		} else {
+			result.Outcome = OutcomeValidatorFailed
+			return result
+		}
 	}
 
 	// 4. Ask user for approval.
@@ -406,6 +446,107 @@ func shortBranch(branch string) string {
 		return branch[i+1:]
 	}
 	return branch
+}
+
+// tryConflictRepair attempts up to MaxConflictRounds rounds of LLM-
+// mediated conflict resolution. Returns (repaired, err) where
+// repaired==true means the merge was successfully completed; err!=nil
+// means an unrecoverable error.
+//
+// Mutates result.RepairAttempts to record what was tried.
+func (in *Integrator) tryConflictRepair(ctx context.Context, worktree string, result *IntegrationResult) (bool, error) {
+	rc := in.cfg.Repair.withDefaults()
+	totalRoundsUsed := 0
+
+	for round := 0; round < rc.MaxConflictRounds; round++ {
+		if totalRoundsUsed >= rc.MaxRoundsPerMR {
+			return false, nil
+		}
+		conflicted, err := listConflictedFiles(ctx, worktree)
+		if err != nil {
+			return false, err
+		}
+		if len(conflicted) == 0 {
+			// Already clean — nothing to do.
+			return true, nil
+		}
+
+		repairResult, _ := resolveConflicts(ctx, rc.Sender, worktree, conflicted)
+		result.RepairAttempts = append(result.RepairAttempts, repairResult)
+		totalRoundsUsed += repairResult.RoundsUsed
+
+		if repairResult.Succeeded {
+			// Verify no markers remain anywhere — defense against the
+			// repair "succeeding" while leaving partial conflicts.
+			stillConflicted, _ := listConflictedFiles(ctx, worktree)
+			if len(stillConflicted) == 0 {
+				in.cfg.Print(fmt.Sprintf("  [integrator] conflict resolved in %d round(s)\n", round+1))
+				return true, nil
+			}
+			// More conflicts remain — try again.
+		}
+		// Loop back for another attempt unless budget exhausted.
+	}
+	return false, nil
+}
+
+// tryValidatorRepair attempts up to MaxValidatorRounds rounds of LLM-
+// mediated repair for validator failures. Returns true if validators
+// pass after repair.
+//
+// On success, mutates results in place to reflect the post-repair
+// validator pass.
+func (in *Integrator) tryValidatorRepair(ctx context.Context, worktree string, results []ValidatorResult, changed []string, intResult *IntegrationResult) bool {
+	rc := in.cfg.Repair.withDefaults()
+
+	// Track total budget across both repair types.
+	totalRoundsUsed := 0
+	for _, r := range intResult.RepairAttempts {
+		totalRoundsUsed += r.RoundsUsed
+	}
+
+	currentResults := results
+	for round := 0; round < rc.MaxValidatorRounds; round++ {
+		if totalRoundsUsed >= rc.MaxRoundsPerMR {
+			return false
+		}
+
+		repairResult, _ := repairValidatorFailure(ctx, rc.Sender, worktree, currentResults)
+		intResult.RepairAttempts = append(intResult.RepairAttempts, repairResult)
+		totalRoundsUsed += repairResult.RoundsUsed
+
+		if !repairResult.Succeeded {
+			return false
+		}
+
+		// Re-run validators on the repaired tree.
+		newResults := in.cfg.Validators.RunAll(ctx, worktree, changed)
+		if !AnyFailed(newResults) {
+			// Mutate the original results slice in place — caller will
+			// see clean validators.
+			for i := range results {
+				if i < len(newResults) {
+					results[i] = newResults[i]
+				}
+			}
+			in.cfg.Print(fmt.Sprintf("  [integrator] validator failure repaired in %d round(s)\n", round+1))
+			return true
+		}
+		currentResults = newResults
+	}
+	return false
+}
+
+// conflictRepairStatus produces a short label for the merge-error
+// message, summarizing why repair didn't succeed.
+func conflictRepairStatus(err error, repaired bool) string {
+	if repaired {
+		return "succeeded"
+	}
+	if err != nil {
+		return fmt.Sprintf("error: %v", err)
+	}
+	return "exhausted budget"
 }
 
 // Compile-time guard: ensures we don't break the integration with
