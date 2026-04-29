@@ -6,8 +6,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/vinodhalaharvi/coven/llm"
+	"github.com/vinodhalaharvi/coven/registry"
 )
 
 func TestNew_RealConfigReturnsControlPlane(t *testing.T) {
@@ -334,4 +338,95 @@ func TestIgnoreInternalPaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRun_StartupDispatchOnExistingDiff verifies that when coven
+// starts on a project with pre-existing uncommitted changes, those
+// changes get routed immediately — without requiring a fresh fsnotify
+// event to wake the system.
+//
+// Previously: the user had to make a fresh edit after starting coven.
+// Files modified before 'coven' was running were invisible until they
+// changed again.
+//
+// This test runs Run() with a scripted Sender, makes uncommitted
+// changes BEFORE Run starts, and verifies the router gets called.
+func TestRun_StartupDispatchOnExistingDiff(t *testing.T) {
+	repo := initGoProject(t)
+
+	// Register a test agent so the router proceeds past the
+	// "no agents registered" early-return.
+	registry.Register(registry.AgentSpec{
+		Name:            "alpha",
+		Description:     "test agent alpha",
+		Role:            "you are alpha",
+		TypicalTriggers: "any change",
+		DomainFiles:     "*.go",
+	})
+	t.Cleanup(func() {
+		registry.Reset()
+	})
+
+	// Make an uncommitted change BEFORE coven starts.
+	mainGo := filepath.Join(repo, "main.go")
+	if err := os.WriteFile(mainGo, []byte("package main\n\nfunc Foo() int { return 42 }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	routerCalled := make(chan string, 1)
+	sender := func(ctx context.Context, system string, msgs []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		// Capture that the router was called and what diff it saw.
+		var content string
+		for _, m := range msgs {
+			for _, b := range m.Blocks {
+				content += b.Text
+			}
+		}
+		select {
+		case routerCalled <- content:
+		default:
+		}
+		// Return "no agents needed" so we don't actually run any agents.
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: `{"agents":[],"reasoning":"test - no routing needed"}`}},
+		}, llm.StopEndTurn, nil
+	}
+
+	var printedMu sync.Mutex
+	var printed strings.Builder
+	cfg := Config{
+		ProjectRoot: repo,
+		Sender:      sender,
+		Confirm:     alwaysConfirm,
+		Print: func(s string) {
+			printedMu.Lock()
+			printed.WriteString(s)
+			printedMu.Unlock()
+		},
+		Settle: 100 * time.Millisecond, // fast for test
+	}
+	cp := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() {
+		runDone <- cp.Run(ctx)
+	}()
+
+	select {
+	case content := <-routerCalled:
+		if !strings.Contains(content, "Foo") {
+			t.Errorf("router was called but didn't see the Foo function in diff:\n%s", content)
+		}
+	case <-time.After(5 * time.Second):
+		printedMu.Lock()
+		t.Errorf("router was not called within 5s of startup — initial diff dispatch broken. Print output:\n%s", printed.String())
+		printedMu.Unlock()
+	}
+
+	cancel()
+	<-runDone
 }

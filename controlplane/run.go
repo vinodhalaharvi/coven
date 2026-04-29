@@ -150,6 +150,31 @@ func (cp *controlPlane) Run(ctx context.Context) error {
 		return fmt.Errorf("subscribe to fsmonitor: %w", err)
 	}
 
+	// Initial diff check: if the working tree has uncommitted changes
+	// at startup, treat them as a freshly-settled changeset and route
+	// immediately. Without this, the user has to make a fresh edit
+	// after starting coven to wake the system — work they did before
+	// 'coven' was running is invisible.
+	//
+	// Run in a goroutine so it doesn't block dispatchLoop startup.
+	// dispatchLoop is what consumes both events AND the timer that
+	// expires when this initial check fires. If we did the check
+	// synchronously here, we'd block the channel read.
+	go func() {
+		// Small delay so fsmonitor finishes its initial directory walk
+		// before we route. Otherwise we could race ahead of the watcher
+		// being fully established.
+		select {
+		case <-time.After(200 * time.Millisecond):
+		case <-ctx.Done():
+			return
+		}
+		cp.cfg.Print("[coven v2] startup: checking for existing changes\n")
+		if err := cp.handleChangeset(ctx); err != nil {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] startup dispatch error: %v\n", err))
+		}
+	}()
+
 	// Run the debouncer + dispatch loop.
 	if err := cp.dispatchLoop(ctx, events); err != nil {
 		return err
