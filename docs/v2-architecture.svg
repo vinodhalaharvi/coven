@@ -1,0 +1,363 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 2400" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#374151"/>
+    </marker>
+    <marker id="arrow-dashed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="900" y="40" text-anchor="middle" font-size="26" font-weight="600" fill="#111827">Coven v2 — Routed Branch-and-Merge Architecture</text>
+  <text x="900" y="68" text-anchor="middle" font-size="14" fill="#6b7280">fsnotify → debounce → git diff → LLM router → parallel agents in worktrees → serial integrator</text>
+
+  <!-- Lifelines: 12 participants -->
+  <!-- Spacing: 1800 / 13 = ~138 per column. Start at 100. -->
+  <g font-size="13" font-weight="600" fill="#fff" text-anchor="middle">
+    <!-- User -->
+    <rect x="50" y="100" width="100" height="36" rx="6" fill="#1e40af"/>
+    <text x="100" y="124">User</text>
+    <line x1="100" y1="136" x2="100" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- fsnotify -->
+    <rect x="180" y="100" width="100" height="36" rx="6" fill="#0369a1"/>
+    <text x="230" y="124">fsnotify</text>
+    <line x1="230" y1="136" x2="230" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Debouncer -->
+    <rect x="310" y="100" width="120" height="36" rx="6" fill="#0369a1"/>
+    <text x="370" y="124">Debouncer</text>
+    <line x1="370" y1="136" x2="370" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Git -->
+    <rect x="460" y="100" width="100" height="36" rx="6" fill="#334155"/>
+    <text x="510" y="124">Git</text>
+    <line x1="510" y1="136" x2="510" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Router -->
+    <rect x="590" y="100" width="120" height="36" rx="6" fill="#7c3aed"/>
+    <text x="650" y="124">Router (LLM)</text>
+    <line x1="650" y1="136" x2="650" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Worktree Mgr -->
+    <rect x="740" y="100" width="120" height="36" rx="6" fill="#0369a1"/>
+    <text x="800" y="124">Worktree Mgr</text>
+    <line x1="800" y1="136" x2="800" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Agent A -->
+    <rect x="890" y="100" width="100" height="36" rx="6" fill="#059669"/>
+    <text x="940" y="124">Agent A</text>
+    <line x1="940" y1="136" x2="940" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Agent B -->
+    <rect x="1020" y="100" width="100" height="36" rx="6" fill="#059669"/>
+    <text x="1070" y="124">Agent B</text>
+    <line x1="1070" y1="136" x2="1070" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Queue -->
+    <rect x="1150" y="100" width="120" height="36" rx="6" fill="#0369a1"/>
+    <text x="1210" y="124">Integration Q</text>
+    <line x1="1210" y1="136" x2="1210" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Integrator -->
+    <rect x="1300" y="100" width="100" height="36" rx="6" fill="#b45309"/>
+    <text x="1350" y="124">Integrator</text>
+    <line x1="1350" y1="136" x2="1350" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- Validators -->
+    <rect x="1430" y="100" width="100" height="36" rx="6" fill="#0369a1"/>
+    <text x="1480" y="124">Validators</text>
+    <line x1="1480" y1="136" x2="1480" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+
+    <!-- main -->
+    <rect x="1560" y="100" width="100" height="36" rx="6" fill="#1e40af"/>
+    <text x="1610" y="124">main branch</text>
+    <line x1="1610" y1="136" x2="1610" y2="2300" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="4,4"/>
+  </g>
+
+  <!-- ===== PHASE 1: DETECTION & DIFF ===== -->
+  <rect x="40" y="160" width="1640" height="30" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+  <text x="60" y="180" font-size="13" font-weight="600" fill="#92400e">Phase 1 — Change detection &amp; diff construction</text>
+
+  <!-- Step 1: User writes -->
+  <g font-size="12" fill="#111827">
+    <line x1="100" y1="210" x2="225" y2="210" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="105" y="205" font-weight="600">1.</text>
+    <text x="125" y="205">write file(s)</text>
+
+    <!-- Step 2: fsnotify event -->
+    <line x1="230" y1="240" x2="365" y2="240" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="235" y="235" font-weight="600">2.</text>
+    <text x="255" y="235">file event(s)</text>
+
+    <!-- Step 3: Debouncer self-call (coalesce) -->
+    <path d="M 370 270 Q 410 270 410 285 Q 410 300 370 300" stroke="#374151" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="380" y="290" font-weight="600">3.</text>
+    <text x="420" y="290">coalesce 2-3s window</text>
+
+    <!-- Step 4: git add -N -->
+    <line x1="370" y1="330" x2="505" y2="330" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="375" y="325" font-weight="600">4.</text>
+    <text x="395" y="325">git add -N (mark untracked)</text>
+
+    <!-- Step 5: git diff HEAD -->
+    <line x1="370" y1="360" x2="505" y2="360" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="375" y="355" font-weight="600">5.</text>
+    <text x="395" y="355">git diff HEAD</text>
+
+    <!-- Step 6: diff returned -->
+    <line x1="510" y1="390" x2="375" y2="390" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="490" y="385" font-weight="600" text-anchor="end">6.</text>
+    <text x="385" y="385" fill="#374151">full diff incl. new files</text>
+  </g>
+
+  <!-- ===== PHASE 2: ROUTING ===== -->
+  <rect x="40" y="420" width="1640" height="30" rx="4" fill="#ede9fe" stroke="#7c3aed" stroke-width="1"/>
+  <text x="60" y="440" font-size="13" font-weight="600" fill="#5b21b6">Phase 2 — LLM routing</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 7: send diff + registry to router -->
+    <line x1="370" y1="475" x2="645" y2="475" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="375" y="470" font-weight="600">7.</text>
+    <text x="395" y="470">diff + agent registry (name, description, typical triggers, domain files, avoids when, examples)</text>
+
+    <!-- Step 8: router responds -->
+    <line x1="650" y1="510" x2="375" y2="510" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="635" y="505" font-weight="600" text-anchor="end">8.</text>
+    <text x="385" y="505" fill="#374151">{agents: ["A", "B"], reasoning: "..."}</text>
+
+    <!-- Step 9: validate router output -->
+    <path d="M 370 540 Q 410 540 410 555 Q 410 570 370 570" stroke="#374151" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="380" y="560" font-weight="600">9.</text>
+    <text x="420" y="560">drop hallucinations, handle empty list</text>
+  </g>
+
+  <!-- ===== PHASE 3: PARALLEL FAN-OUT ===== -->
+  <rect x="40" y="595" width="1640" height="30" rx="4" fill="#dcfce7" stroke="#059669" stroke-width="1"/>
+  <text x="60" y="615" font-size="13" font-weight="600" fill="#065f46">Phase 3 — Parallel fan-out (agents run concurrently in their own worktrees)</text>
+
+  <!-- Parallel block container -->
+  <rect x="730" y="640" width="430" height="600" rx="4" fill="#f0fdf4" stroke="#10b981" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="945" y="660" font-size="12" font-weight="600" fill="#065f46" text-anchor="middle">par — Agent A and Agent B run in parallel</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 10: provision worktree A -->
+    <line x1="370" y1="690" x2="795" y2="690" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="375" y="685" font-weight="600">10.</text>
+    <text x="395" y="685">provision /tmp/coven-worktrees/A-uuid/</text>
+
+    <!-- Step 11: worktree create -->
+    <line x1="800" y1="720" x2="505" y2="720" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="785" y="715" font-weight="600" text-anchor="end">11.</text>
+    <text x="775" y="715" text-anchor="end">git worktree add ... -b agent-A/uuid</text>
+
+    <!-- Step 12: dispatch task to Agent A -->
+    <line x1="800" y1="755" x2="935" y2="755" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="805" y="750" font-weight="600">12.</text>
+    <text x="825" y="750">Task{worktree, branch, diff, why, base}</text>
+
+    <!-- Step 13: agent works (self-loop) -->
+    <path d="M 940 785 Q 980 785 980 800 Q 980 815 940 815" stroke="#374151" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="950" y="805" font-weight="600">13.</text>
+    <text x="990" y="805">work in conversation loop</text>
+  </g>
+
+  <!-- Allow-list note -->
+  <rect x="800" y="830" width="350" height="50" rx="4" fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+  <text x="975" y="850" font-size="11" font-weight="600" fill="#92400e" text-anchor="middle">Allow-list execs auto-approved (no y/n):</text>
+  <text x="975" y="868" font-size="11" fill="#78350f" text-anchor="middle">file writes, codegen (buf/sqlc/wire), go build/test/vet, go install</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 14: out-of-list y/n -->
+    <line x1="940" y1="905" x2="105" y2="905" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+    <text x="945" y="900" font-weight="600">14.</text>
+    <text x="965" y="900" fill="#991b1b">out-of-list exec → y/n? (rare)</text>
+
+    <!-- Step 15: user response -->
+    <line x1="100" y1="935" x2="935" y2="935" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="105" y="930" font-weight="600">15.</text>
+    <text x="125" y="930" fill="#374151">y or n</text>
+
+    <!-- Step 16: agent commits -->
+    <path d="M 940 965 Q 980 965 980 980 Q 980 995 940 995" stroke="#374151" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="950" y="985" font-weight="600">16.</text>
+    <text x="990" y="985">commit on branch agent-A/uuid</text>
+
+    <!-- Step 17: enqueue -->
+    <line x1="940" y1="1020" x2="1205" y2="1020" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="945" y="1015" font-weight="600">17.</text>
+    <text x="965" y="1015">enqueue branch for integration</text>
+  </g>
+
+  <!-- Agent B: condensed parallel track -->
+  <text x="945" y="1060" font-size="11" font-weight="600" fill="#059669" text-anchor="middle">— concurrently —</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 18: provision worktree B -->
+    <line x1="370" y1="1095" x2="795" y2="1095" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="375" y="1090" font-weight="600">18.</text>
+    <text x="395" y="1090">provision /tmp/coven-worktrees/B-uuid/ + branch agent-B/uuid</text>
+
+    <!-- Step 19: dispatch task to Agent B -->
+    <line x1="800" y1="1130" x2="1065" y2="1130" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="805" y="1125" font-weight="600">19.</text>
+    <text x="825" y="1125">Task{...}</text>
+
+    <!-- Step 20: agent B works -->
+    <path d="M 1070 1160 Q 1110 1160 1110 1175 Q 1110 1190 1070 1190" stroke="#374151" stroke-width="1.5" fill="none" marker-end="url(#arrow)"/>
+    <text x="1080" y="1180" font-weight="600">20.</text>
+    <text x="1120" y="1180">do work, commit on its branch</text>
+
+    <!-- Step 21: enqueue B -->
+    <line x1="1070" y1="1215" x2="1205" y2="1215" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1075" y="1210" font-weight="600">21.</text>
+    <text x="1095" y="1210">enqueue</text>
+  </g>
+
+  <!-- ===== PHASE 4: SERIAL INTEGRATION ===== -->
+  <rect x="40" y="1260" width="1640" height="30" rx="4" fill="#fef3c7" stroke="#b45309" stroke-width="1"/>
+  <text x="60" y="1280" font-size="13" font-weight="600" fill="#78350f">Phase 4 — Serial integration (one MR at a time, FIFO from queue)</text>
+
+  <!-- Loop container -->
+  <rect x="1190" y="1305" width="450" height="780" rx="4" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="1415" y="1325" font-size="12" font-weight="600" fill="#78350f" text-anchor="middle">loop — process MRs one at a time</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 22: dequeue -->
+    <line x1="1210" y1="1355" x2="1345" y2="1355" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1215" y="1350" font-weight="600">22.</text>
+    <text x="1235" y="1350">next branch</text>
+
+    <!-- Step 23: git merge into temp worktree -->
+    <line x1="1350" y1="1390" x2="515" y2="1390" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1345" y="1385" font-weight="600" text-anchor="end">23.</text>
+    <text x="1335" y="1385" text-anchor="end">git merge agent-A/uuid into temp worktree</text>
+
+    <!-- Branch: clean merge or conflict -->
+    <text x="1415" y="1425" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">[alt: clean merge / textual conflict]</text>
+
+    <!-- Step 24: clean merge → run validators -->
+    <line x1="1350" y1="1455" x2="1475" y2="1455" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1355" y="1450" font-weight="600">24.</text>
+    <text x="1375" y="1450">run validators on changed files</text>
+    <text x="1375" y="1466" font-style="italic" fill="#6b7280">(go build, go vet, go test)</text>
+
+    <!-- Step 25: validator result -->
+    <line x1="1480" y1="1495" x2="1355" y2="1495" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="1465" y="1490" font-weight="600" text-anchor="end">25.</text>
+    <text x="1455" y="1490" text-anchor="end" fill="#374151">pass / fail</text>
+
+    <!-- Branch: pass or fail -->
+    <text x="1415" y="1525" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">[alt: all pass / validator failed / textual conflict]</text>
+
+    <!-- Step 26: ON PASS — ask user approval -->
+    <line x1="1350" y1="1560" x2="105" y2="1560" stroke="#1e40af" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1345" y="1555" font-weight="600" text-anchor="end">26.</text>
+    <text x="1335" y="1555" text-anchor="end" fill="#1e40af">[pass] approve merge to main? (y/n)</text>
+
+    <!-- Step 27: user approves -->
+    <line x1="100" y1="1590" x2="1345" y2="1590" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="105" y="1585" font-weight="600">27.</text>
+    <text x="125" y="1585" fill="#374151">y</text>
+
+    <!-- Step 28: fast-forward main -->
+    <line x1="1350" y1="1620" x2="1605" y2="1620" stroke="#1e40af" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1355" y="1615" font-weight="600">28.</text>
+    <text x="1375" y="1615" fill="#1e40af">fast-forward main</text>
+
+    <!-- Step 29: cleanup worktree -->
+    <line x1="1350" y1="1655" x2="805" y2="1655" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1345" y="1650" font-weight="600" text-anchor="end">29.</text>
+    <text x="1335" y="1650" text-anchor="end">cleanup agent worktree + branch</text>
+
+    <!-- Step 30: ON FAIL — repair via LLM -->
+    <line x1="1350" y1="1700" x2="655" y2="1700" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+    <text x="1345" y="1695" font-weight="600" text-anchor="end">30.</text>
+    <text x="1335" y="1695" text-anchor="end" fill="#991b1b">[validator failed] LLM repair (1 round build, 2 textual)</text>
+
+    <!-- Step 31: repair result -->
+    <line x1="650" y1="1735" x2="1345" y2="1735" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="655" y="1730" font-weight="600">31.</text>
+    <text x="675" y="1730" fill="#374151">repaired patch / give-up signal</text>
+
+    <text x="1415" y="1770" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">[alt: repair succeeds / repair fails]</text>
+
+    <!-- Step 32: ON REPAIR SUCCESS — revalidate -->
+    <line x1="1350" y1="1800" x2="1475" y2="1800" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1355" y="1795" font-weight="600">32.</text>
+    <text x="1375" y="1795">revalidate</text>
+
+    <!-- Step 33: revalidation pass -->
+    <line x1="1480" y1="1830" x2="1355" y2="1830" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="1465" y="1825" font-weight="600" text-anchor="end">33.</text>
+    <text x="1455" y="1825" text-anchor="end" fill="#374151">pass</text>
+
+    <!-- Step 34: ON REPAIR SUCCESS → user approval -->
+    <line x1="1350" y1="1860" x2="105" y2="1860" stroke="#1e40af" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1345" y="1855" font-weight="600" text-anchor="end">34.</text>
+    <text x="1335" y="1855" text-anchor="end" fill="#1e40af">approve merge to main? (y/n)</text>
+
+    <!-- Step 35: ON REPAIR FAIL — requeue to originator -->
+    <line x1="1350" y1="1905" x2="945" y2="1905" stroke="#dc2626" stroke-width="1.5" stroke-dasharray="4,2" marker-end="url(#arrow-red)"/>
+    <text x="1345" y="1900" font-weight="600" text-anchor="end">35.</text>
+    <text x="1335" y="1900" text-anchor="end" fill="#991b1b">[repair failed] requeue Agent A with full context</text>
+    <text x="1145" y="1920" font-size="11" fill="#991b1b" text-anchor="end">(task, prev output, failure, current main)</text>
+
+    <!-- Step 36: ON TEXTUAL CONFLICT — LLM merge resolution -->
+    <line x1="1350" y1="1955" x2="655" y2="1955" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+    <text x="1345" y="1950" font-weight="600" text-anchor="end">36.</text>
+    <text x="1335" y="1950" text-anchor="end" fill="#991b1b">[textual conflict] LLM merge resolution (max 2 rounds)</text>
+
+    <!-- Step 37: resolved or gives up -->
+    <line x1="650" y1="1990" x2="1345" y2="1990" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="655" y="1985" font-weight="600">37.</text>
+    <text x="675" y="1985" fill="#374151">resolved patch / give-up</text>
+
+    <!-- Step 38: end of loop -->
+    <text x="1415" y="2025" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">end loop — pop next from queue</text>
+  </g>
+
+  <!-- ===== PHASE 5: CASCADE ===== -->
+  <rect x="40" y="2110" width="1640" height="30" rx="4" fill="#dbeafe" stroke="#1e40af" stroke-width="1"/>
+  <text x="60" y="2130" font-size="13" font-weight="600" fill="#1e3a8a">Phase 5 — Merge into main triggers next cycle (cascade)</text>
+
+  <g font-size="12" fill="#111827">
+    <!-- Step 38: main → fsnotify -->
+    <line x1="1610" y1="2165" x2="235" y2="2165" stroke="#1e40af" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="1605" y="2160" font-weight="600" text-anchor="end">38.</text>
+    <text x="1595" y="2160" text-anchor="end" fill="#1e40af">file changes from merge</text>
+
+    <!-- Step 39: fsnotify → Debouncer -->
+    <line x1="230" y1="2195" x2="365" y2="2195" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="235" y="2190" font-weight="600">39.</text>
+    <text x="255" y="2190">events</text>
+
+    <!-- Step 40: cycle repeats -->
+    <text x="370" y="2230" font-size="12" font-style="italic" fill="#6b7280">cycle repeats from step 3 if router identifies follow-up agents</text>
+  </g>
+
+  <!-- Legend -->
+  <g font-size="11">
+    <rect x="50" y="2270" width="1700" height="80" rx="4" fill="#f9fafb" stroke="#e5e7eb"/>
+    <text x="60" y="2290" font-weight="600" fill="#111827">Legend</text>
+
+    <line x1="60" y1="2308" x2="100" y2="2308" stroke="#374151" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="110" y="2312" fill="#374151">synchronous call</text>
+
+    <line x1="240" y1="2308" x2="280" y2="2308" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-dashed)"/>
+    <text x="290" y="2312" fill="#374151">return value</text>
+
+    <line x1="400" y1="2308" x2="440" y2="2308" stroke="#dc2626" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+    <text x="450" y="2312" fill="#991b1b">failure / human-gated path</text>
+
+    <line x1="640" y1="2308" x2="680" y2="2308" stroke="#1e40af" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="690" y="2312" fill="#1e40af">user-facing or main-branch action</text>
+
+    <text x="60" y="2335" font-style="italic" fill="#6b7280">Allow-list (auto-approved, no y/n): file writes, codegen (buf/sqlc/wire), go build/test/vet, go install. Anything else requires explicit y/n from user.</text>
+  </g>
+</svg>
