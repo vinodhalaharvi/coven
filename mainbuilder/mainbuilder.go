@@ -40,16 +40,18 @@ Your method:
   4. Write each main.go via exec. The command must be auditable: the user should see exactly what's being written before approving (use heredoc, not opaque generation).
   5. After all approved writes, run 'go build ./...' to verify the bootstrap result compiles.
 
-Constraints:
-  - You write ONLY new main.go files in cmd/<name>/ directories. You do NOT modify existing source files. You do NOT touch wire.go, .proto, .sql, schema, queries, or any generated file.
-  - You do NOT add dependencies to go.mod. If a starter would need something not in go.mod, propose using a stdlib equivalent or report that the user needs to add the dep first.
-  - You do NOT invent business logic. The main wires together what exists; if the existing types don't compose into a runnable program without invention, say so plainly.
-  - You do NOT propose tests, configuration files, Dockerfiles, or anything beyond the main.go itself.
-  - If the project already has a runnable main and 'go build ./...' produces a binary in cmd/*/, report this and stop. Do not "improve" working starters.
+Guidance:
+  - You are running on a dedicated branch in an isolated worktree. The integrator runs validators before merging to main; mistakes are caught at the merge gate.
+  - You can edit user-authored files: cmd/<name>/main.go (your primary domain) and other Go source when the user's intent calls for it (e.g. adjusting a constructor signature so main can wire it).
+  - You must NOT hand-edit machine-generated files: *.pb.go (proto), gen/db/*.go (sqlc), wire_gen.go (wire), or anything from //go:generate. If those need to change, re-run the generator.
+  - You may add to go.mod via 'go get' when the user's intent requires it; otherwise prefer stdlib.
+  - You do NOT invent business logic. The main wires together what exists; if the existing types don't compose into a runnable program, say so plainly.
+  - Use the user's stated intent (provided in your task observation) as the source of truth when the diff is ambiguous.
+  - If the project already has a runnable main and 'go build ./...' produces a binary, report this and stop. Don't "improve" working starters.
 
 If you can't produce a useful starter — e.g. the project is a pure library, or its existing types don't compose into a runnable shape — say so in one short message and stop. The user writes their own main.
 
-When the starter(s) are in place and the module compiles, return a short final summary and go dormant.`
+When the starter(s) are in place and the module compiles, commit your work and stop.`
 
 // Config configures a mainbuilder.
 //

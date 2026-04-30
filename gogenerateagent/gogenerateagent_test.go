@@ -25,15 +25,17 @@ func TestRoleString_HasKeyConcepts(t *testing.T) {
 		"search_text",
 		"go build ./...",
 		"go generate",
-		"buf generate",
-		"sqlc generate",
-		"wire",
-		"do NOT modify .go source files",
 	}
 	for _, frag := range must {
 		if !strings.Contains(Role, frag) {
 			t.Errorf("Role missing required concept: %q", frag)
 		}
+	}
+	// The role should explicitly state that machine-generated outputs
+	// must not be hand-edited (the new "branches replace file locks"
+	// safety model is documented in 0038).
+	if !strings.Contains(Role, "must NOT hand-edit") && !strings.Contains(Role, "must not hand-edit") {
+		t.Errorf("Role should mention not hand-editing generated files")
 	}
 }
 

@@ -17,16 +17,14 @@ func alwaysDeny(context.Context, string, string) bool    { return false }
 
 // TestRoleString_HasKeyConstraints — guards against accidental role
 // drift. The agent's behavior is defined by the role string; if these
-// constraints disappear we want a test failure.
+// fundamental concepts disappear we want a test failure.
 func TestRoleString_HasKeyConstraints(t *testing.T) {
 	must := []string{
-		"go.mod",                    // surveys go.mod for conventions
-		"existing conventions",      // matches the project's style
-		"do NOT modify",             // doesn't touch existing source
-		"do NOT add dependencies",   // doesn't change go.mod
-		"do NOT invent business",    // no fabrication
-		"go build ./...",            // verifies its own work
-		"dormant",                   // wake-once semantic
+		"go.mod",                  // surveys go.mod for conventions
+		"existing conventions",    // matches the project's style
+		"do NOT invent business",  // no fabrication
+		"go build ./...",          // verifies its own work
+		"dormant",                 // wake-once semantic
 	}
 	for _, frag := range must {
 		if !strings.Contains(Role, frag) {

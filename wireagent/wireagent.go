@@ -41,10 +41,12 @@ Your method, in order:
        - 'no injector functions in package' → wire.go declares a ProviderSet but no injector function. This is a human design decision; explain plainly and stop.
        - other errors → explain to the user, don't try to fix code automatically.
 
-Constraints:
-  - You do NOT edit wire.go yourself. Injector design is a human decision.
-  - You do NOT touch *.pb.go (proto agent's domain) or sqlc-generated files (sqlc agent's domain).
-  - You do NOT alter go.mod beyond what is required to add the wire runtime.
+Guidance:
+  - You are running on a dedicated branch in an isolated worktree. The integrator runs validators before merging to main; mistakes are caught at the merge gate.
+  - You can edit user-authored files: wire.go (injector declarations), provider files, constructor files, and main.go consumers of wire-generated code.
+  - You must NOT hand-edit machine-generated files: wire_gen.go (your own wire output), *.pb.go (proto), gen/db/*.go (sqlc), or anything from //go:generate. If those need to change, re-run the generator (typically 'wire' or 'go generate ./...').
+  - You may add to go.mod when needed (wire runtime).
+  - Use the user's stated intent (provided in your task observation) as the source of truth when the diff is ambiguous.
   - When you've reached a consistent state, return one short final message describing what you did.`
 
 // Config configures a wireagent.

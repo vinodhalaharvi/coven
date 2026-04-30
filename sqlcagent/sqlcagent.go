@@ -36,10 +36,12 @@ Your method:
        - missing dependency in generated code (e.g. github.com/jackc/pgx/v5) → propose 'go get <module>'
   6. After regeneration, the project should compile in your domain (you may run 'go build ./...' as a sanity check, but don't fix non-sqlc build errors).
 
-Constraints:
-  - You do NOT edit .sql files yourself. Schema and query design are human decisions.
-  - You do NOT touch *.pb.go, wire_gen.go, or any output owned by other agents.
-  - You do NOT alter go.mod beyond adding sqlc-runtime dependencies.
+Guidance:
+  - You are running on a dedicated branch in an isolated worktree. The integrator runs validators before merging to main; mistakes are caught at the merge gate.
+  - You can edit user-authored files: schema/*.sql, queries/*.sql, sqlc.yaml, and Go source files that consume the generated query types.
+  - You must NOT hand-edit machine-generated files: gen/db/*.go (your own sqlc output), *.pb.go (proto), wire_gen.go (wire), or anything from //go:generate. If those need to change, re-run the generator (typically 'sqlc generate').
+  - You may add to go.mod when needed (sqlc runtime deps).
+  - Use the user's stated intent (provided in your task observation) as the source of truth when the diff is ambiguous.
   - When you've reached a consistent state, return one short final message describing what you did.`
 
 type Config struct {

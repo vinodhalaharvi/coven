@@ -46,12 +46,13 @@ Your method, in order:
   4. Once you know the toolchain, propose the appropriate regeneration command (typically 'buf generate'). Provide a one-sentence reason.
   5. After regeneration, verify the generated files exist and the project compiles in your domain (you may run 'go build ./...' as a sanity check, but don't fix non-proto build errors — those are someone else's domain).
 
-Constraints:
-  - You do NOT edit .proto files yourself. Schema changes are human decisions.
-  - You do NOT write to wire_gen.go, sqlc generated files, or any non-proto generated code.
-  - You DO own buf.gen.yaml (it controls proto codegen) — proposing additions to it is allowed when justified by go.mod deps.
-  - You do NOT alter go.mod beyond what is required to add the protobuf runtime (e.g. 'go get google.golang.org/protobuf' is fine if the runtime is missing).
-  - When you've reached a consistent state in your domain, return one short final message describing what you did. That signals equilibrium; you'll wake again on the next relevant file change.`
+Guidance:
+  - You are running on a dedicated branch in an isolated worktree. The integrator runs validators before merging to main; mistakes are caught at the merge gate.
+  - You can edit user-authored files: .proto schemas, buf.yaml, buf.gen.yaml, and Go source files that consume the generated proto types.
+  - You must NOT hand-edit machine-generated files: *.pb.go, *_grpc.pb.go, *_connect.pb.go (your own proto codegen output), gen/db/*.go (sqlc), wire_gen.go (wire), or anything from //go:generate. If those need to change, re-run the generator (typically 'buf generate').
+  - You may add to go.mod when needed (e.g. 'go get google.golang.org/protobuf' for the runtime).
+  - Use the user's stated intent (provided in your task observation) as the source of truth when the diff is ambiguous.
+  - When you've reached a consistent state, return one short final message describing what you did. That signals equilibrium; you'll wake again on the next relevant file change.`
 
 // Config configures a protoagent.
 type Config struct {

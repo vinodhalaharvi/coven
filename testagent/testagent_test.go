@@ -25,13 +25,17 @@ func TestRoleString_HasKeyConcepts(t *testing.T) {
 		"pureast",
 		"_test.go",
 		"real assertions, not TODO stubs",
-		"do NOT modify production code",
 		"public function",
 	}
 	for _, frag := range must {
 		if !strings.Contains(Role, frag) {
 			t.Errorf("Role missing required concept: %q", frag)
 		}
+	}
+	// Generated-files rule (from 0038): the role must explicitly state
+	// that machine-generated files should not be hand-edited.
+	if !strings.Contains(Role, "must NOT hand-edit") && !strings.Contains(Role, "must not hand-edit") {
+		t.Errorf("Role should mention not hand-editing generated files")
 	}
 }
 

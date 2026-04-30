@@ -25,8 +25,6 @@ func TestRoleString_HasKeyConcepts(t *testing.T) {
 		"STEADY-STATE",
 		"go build ./...",
 		"equilibrium",
-		"do NOT modify cmd/",
-		"do NOT modify buf.gen.yaml",
 		"do NOT invent business logic",
 		"RegisterConnectHandlers",
 	}
@@ -34,6 +32,10 @@ func TestRoleString_HasKeyConcepts(t *testing.T) {
 		if !strings.Contains(Role, frag) {
 			t.Errorf("Role missing required concept: %q", frag)
 		}
+	}
+	// Generated-files rule (from 0038).
+	if !strings.Contains(Role, "must NOT hand-edit") && !strings.Contains(Role, "must not hand-edit") {
+		t.Errorf("Role should mention not hand-editing generated files")
 	}
 }
 
