@@ -9,16 +9,16 @@
 // Usage:
 //
 //	coven -root <path> [-llm sonnet|haiku|opus] [-auto-confirm]
-//	      [-enable-repair]
+//	      [-enable-repair=false]
 //
 // Flags:
 //
 //	-root           project root to watch (default ".")
 //	-llm            Claude model: sonnet (default), haiku, opus
 //	-auto-confirm   skip y/n prompts (dev/testing only)
-//	-enable-repair  enable LLM-mediated repair for merge conflicts and
-//	                validator failures (default off — repair is a
-//	                best-effort optimization that costs LLM calls)
+//	-enable-repair  LLM-mediated repair for merge conflicts and
+//	                validator failures (default ON — pass
+//	                -enable-repair=false to disable)
 //
 // Environment:
 //
@@ -91,7 +91,7 @@ func main() {
 		root         = flag.String("root", ".", "project root to watch")
 		llmModel     = flag.String("llm", "sonnet", "Claude model: sonnet | haiku | opus")
 		autoConfirm  = flag.Bool("auto-confirm", false, "skip y/n prompts (dev only)")
-		enableRepair = flag.Bool("enable-repair", false, "enable LLM-mediated repair for merge conflicts and validator failures")
+		enableRepair = flag.Bool("enable-repair", true, "LLM-mediated repair for merge conflicts and validator failures (default: true; use -enable-repair=false to disable)")
 	)
 	flag.Parse()
 

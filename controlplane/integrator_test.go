@@ -213,10 +213,12 @@ func TestIntegrator_Process_UserDecline(t *testing.T) {
 		t.Errorf("user declined but main still has agent commit:\n%s", out)
 	}
 
-	// Agent worktree should still exist (we don't clean up on decline
-	// — that's the user's choice; they may want to inspect or rerun).
-	if _, err := os.Stat(wt.Path); err != nil {
-		t.Errorf("worktree was unexpectedly cleaned up after user decline: %v", err)
+	// Agent worktree should be cleaned up. Pre-0040, cleanup only
+	// happened on success — declined/conflicted/failed branches were
+	// orphaned. 0040 made cleanup unconditional: integration is
+	// terminal, so the agent's worktree is no longer needed.
+	if _, err := os.Stat(wt.Path); !os.IsNotExist(err) {
+		t.Errorf("worktree should have been cleaned up after user decline: %s", wt.Path)
 	}
 }
 
@@ -516,3 +518,156 @@ func TestIntegrator_ParallelProcessIsSerial(t *testing.T) {
 
 // Need an agent.ConfirmFunc-typed nil for some tests
 var _ agent.ConfirmFunc = alwaysConfirm
+
+// TestIntegrator_Process_CleanupAfterMergeConflict verifies the bug
+// from production: when a merge fails with conflict, the agent's
+// worktree and branch must still be cleaned up. Previously only
+// successful merges triggered cleanup.
+func TestIntegrator_Process_CleanupAfterMergeConflict(t *testing.T) {
+	proj := initGoProject(t)
+	mgr := NewWorktreeMgr(proj)
+
+	// Set up a conflict same as TestIntegrator_Process_MergeConflict.
+	_ = makeFileChange(t, proj, "main.go",
+		"package main\n\nimport \"fmt\"\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tfmt.Println(\"main version\")\n}\n",
+		"main edit")
+
+	wt, err := mgr.Provision(context.Background(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Note: NO defer mgr.Cleanup — we want to verify the integrator
+	// cleans up by itself.
+
+	wtPath := wt.Path
+	wtBranch := wt.Branch
+
+	_ = makeFileChange(t, proj, "main.go",
+		"package main\n\nimport \"fmt\"\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tfmt.Println(\"DIVERGED from main\")\n}\n",
+		"main divergence")
+	_ = makeFileChange(t, wt.Path, "main.go",
+		"package main\n\nimport \"fmt\"\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tfmt.Println(\"agent version\")\n}\n",
+		"agent edit")
+
+	cfg := IntegratorConfig{
+		ProjectRoot: proj,
+		WorktreeMgr: mgr,
+		Validators:  NewValidatorRegistry(),
+		Confirm:     alwaysConfirm,
+		Print:       func(string) {},
+	}
+	in, _ := NewIntegrator(cfg)
+
+	result := in.Process(context.Background(), IntegrationRequest{
+		AgentName: "alpha",
+		Branch:    wtBranch,
+		Worktree:  wtPath,
+	})
+
+	if result.Outcome != OutcomeMergeConflict {
+		t.Fatalf("Outcome = %s, want merge-conflict", result.Outcome)
+	}
+
+	// CRITICAL: verify the worktree is cleaned up.
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir %s still exists after merge-conflict outcome", wtPath)
+	}
+
+	// CRITICAL: verify the agent's branch was deleted.
+	out := gitInDir(t, proj, "branch", "--list", wtBranch)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("agent branch %s still exists after merge-conflict:\n%s", wtBranch, out)
+	}
+}
+
+// TestIntegrator_Process_CleanupAfterUserDecline verifies cleanup also
+// fires when the user declines the integration prompt.
+func TestIntegrator_Process_CleanupAfterUserDecline(t *testing.T) {
+	proj := initGoProject(t)
+	mgr := NewWorktreeMgr(proj)
+
+	wt, err := mgr.Provision(context.Background(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wtPath := wt.Path
+	wtBranch := wt.Branch
+
+	_ = makeFileChange(t, wt.Path, "new_file.go",
+		"package main\n\nfunc helper() {}\n",
+		"agent: add helper")
+
+	// Always-deny confirm: the user "rejects" the merge.
+	cfg := IntegratorConfig{
+		ProjectRoot: proj,
+		WorktreeMgr: mgr,
+		Validators:  NewValidatorRegistry(),
+		Confirm:     func(context.Context, string, string) bool { return false },
+		Print:       func(string) {},
+	}
+	in, _ := NewIntegrator(cfg)
+
+	result := in.Process(context.Background(), IntegrationRequest{
+		AgentName: "alpha",
+		Branch:    wtBranch,
+		Worktree:  wtPath,
+	})
+
+	if result.Outcome != OutcomeUserDeclined {
+		t.Fatalf("Outcome = %s, want user-declined", result.Outcome)
+	}
+
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir %s still exists after user-declined outcome", wtPath)
+	}
+	out := gitInDir(t, proj, "branch", "--list", wtBranch)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("agent branch %s still exists after user-declined:\n%s", wtBranch, out)
+	}
+}
+
+// TestIntegrator_Process_CleanupAfterValidatorFailure verifies cleanup
+// when validators reject the merge.
+func TestIntegrator_Process_CleanupAfterValidatorFailure(t *testing.T) {
+	proj := initGoProject(t)
+	mgr := NewWorktreeMgr(proj)
+
+	wt, err := mgr.Provision(context.Background(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wtPath := wt.Path
+	wtBranch := wt.Branch
+
+	// Agent commits a syntax error — validator (go build) will fail.
+	_ = makeFileChange(t, wt.Path, "broken.go",
+		"package main\n\nfunc broken( {\n",
+		"agent: introduce syntax error")
+
+	cfg := IntegratorConfig{
+		ProjectRoot: proj,
+		WorktreeMgr: mgr,
+		Validators:  NewValidatorRegistry(),
+		Confirm:     alwaysConfirm,
+		Print:       func(string) {},
+	}
+	in, _ := NewIntegrator(cfg)
+
+	result := in.Process(context.Background(), IntegrationRequest{
+		AgentName: "alpha",
+		Branch:    wtBranch,
+		Worktree:  wtPath,
+	})
+
+	if result.Outcome != OutcomeValidatorFailed {
+		t.Fatalf("Outcome = %s, want validator-failed", result.Outcome)
+	}
+
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Errorf("worktree dir %s still exists after validator-failed outcome", wtPath)
+	}
+	out := gitInDir(t, proj, "branch", "--list", wtBranch)
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("agent branch %s still exists after validator-failed:\n%s", wtBranch, out)
+	}
+}

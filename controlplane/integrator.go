@@ -345,6 +345,25 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 
 	result := IntegrationResult{Request: req}
 
+	// Cleanup the agent's worktree no matter how Process exits — on
+	// success, conflict, validator failure, user decline, error, or
+	// panic. Without this, failed merges leave orphaned worktrees in
+	// .coven/worktrees/ and orphaned branches that confuse the user
+	// and bloat the repo.
+	//
+	// We use a deferred closure so it always runs, including on
+	// early returns and panics. The agent's worktree is identified
+	// by req.Worktree + req.Branch + req.AgentName.
+	if req.Worktree != "" {
+		defer func() {
+			_ = in.cfg.WorktreeMgr.Cleanup(ctx, &Worktree{
+				Path:   req.Worktree,
+				Branch: req.Branch,
+				Agent:  req.AgentName,
+			})
+		}()
+	}
+
 	// 1. Provision temp worktree at current main.
 	tempWt, err := in.cfg.WorktreeMgr.Provision(ctx, "integrator-temp")
 	if err != nil {
@@ -481,14 +500,8 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 		}
 	}
 
-	// 6. Cleanup the agent's worktree on success.
-	if req.Worktree != "" {
-		_ = in.cfg.WorktreeMgr.Cleanup(ctx, &Worktree{
-			Path:   req.Worktree,
-			Branch: req.Branch,
-			Agent:  req.AgentName,
-		})
-	}
+	// 6. Working tree synced. The deferred cleanup at the top of
+	// Process will remove the agent's worktree.
 
 	result.Outcome = OutcomeMerged
 	return result
