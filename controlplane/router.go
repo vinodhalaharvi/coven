@@ -66,6 +66,17 @@ func NewRouter(sender llm.Sender) *Router {
 // soft problems (LLM picked a non-existent agent), the router silently
 // drops the bad name and returns the rest.
 func (r *Router) Route(ctx context.Context, diff string) (*Routing, error) {
+	return r.RouteWithIntent(ctx, diff, "")
+}
+
+// RouteWithIntent is like Route but also takes the user's stated
+// intent for the change. Intent (when non-empty) is added to the
+// router's prompt so Claude can disambiguate diffs whose intent
+// isn't obvious from the patch alone.
+//
+// Empty intent gives identical behavior to Route — useful for
+// tests and code paths that don't have intent available.
+func (r *Router) RouteWithIntent(ctx context.Context, diff, intent string) (*Routing, error) {
 	if strings.TrimSpace(diff) == "" {
 		// No changes — nothing to route. Return early without an LLM call.
 		return &Routing{Agents: nil, Reasoning: "diff is empty"}, nil
@@ -77,7 +88,7 @@ func (r *Router) Route(ctx context.Context, diff string) (*Routing, error) {
 	}
 
 	system := buildRouterSystemPrompt(specs)
-	user := buildRouterUserPrompt(diff)
+	user := buildRouterUserPrompt(diff, intent)
 
 	msg, _, err := r.sender(ctx, system, []llm.Message{
 		{Role: llm.RoleUser, Blocks: []llm.Block{{Text: user}}},
@@ -195,8 +206,24 @@ Available agents:
 	return b.String()
 }
 
-// buildRouterUserPrompt wraps the diff in instructions for the LLM.
-func buildRouterUserPrompt(diff string) string {
+// buildRouterUserPrompt wraps the diff (and optional user intent)
+// in instructions for the LLM.
+func buildRouterUserPrompt(diff, intent string) string {
+	if strings.TrimSpace(intent) != "" {
+		return fmt.Sprintf(`Here is the diff to route, along with the user's stated intent for this change.
+
+USER'S INTENT:
+%s
+
+The intent above is what the user explicitly told us they want from this commit. Use it to disambiguate the diff: if the diff alone could be interpreted multiple ways, the intent tells you which interpretation is correct. The intent does NOT change which agents exist or what they do — it just helps you pick the right ones for what the user actually wants.
+
+Diff:
+---
+%s
+---
+
+Respond with JSON only.`, strings.TrimSpace(intent), diff)
+	}
 	return fmt.Sprintf(`Here is the diff to route. Decide which agents should handle it.
 
 Diff:

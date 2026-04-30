@@ -244,13 +244,72 @@ func TestSystemPromptIncludesAgentMetadata(t *testing.T) {
 
 func TestUserPromptIncludesDiff(t *testing.T) {
 	diff := "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1 +1 @@\n+test\n"
-	prompt := buildRouterUserPrompt(diff)
+	prompt := buildRouterUserPrompt(diff, "")
 
 	if !strings.Contains(prompt, diff) {
 		t.Error("user prompt should embed the diff")
 	}
 	if !strings.Contains(prompt, "JSON only") {
 		t.Error("user prompt should re-emphasize JSON-only output")
+	}
+	if strings.Contains(prompt, "USER'S INTENT") {
+		t.Error("with empty intent, prompt should not have intent section")
+	}
+}
+
+func TestUserPromptWithIntent_IncludesIntent(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n+test\n"
+	intent := "I removed Multiply by accident — please restore it"
+	prompt := buildRouterUserPrompt(diff, intent)
+
+	if !strings.Contains(prompt, diff) {
+		t.Error("user prompt should still embed the diff")
+	}
+	if !strings.Contains(prompt, "USER'S INTENT") {
+		t.Error("prompt should have intent header when intent is non-empty")
+	}
+	if !strings.Contains(prompt, "removed Multiply") {
+		t.Error("prompt should contain the intent text")
+	}
+	if !strings.Contains(prompt, "disambiguat") {
+		t.Error("prompt should explain how to use intent")
+	}
+}
+
+// TestRouteWithIntent_PassesIntentToLLM verifies end-to-end that
+// when RouteWithIntent is called, the user's intent appears in the
+// prompt sent to the LLM.
+func TestRouteWithIntent_PassesIntentToLLM(t *testing.T) {
+	setupRegistry(t)
+
+	var capturedUserPrompt string
+	sender := func(ctx context.Context, system string, conv []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		// The router sends a single user message; capture its text.
+		for _, m := range conv {
+			if m.Role == llm.RoleUser {
+				for _, b := range m.Blocks {
+					capturedUserPrompt += b.Text
+				}
+			}
+		}
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: `{"agents":["alpha"],"reasoning":"x"}`}},
+		}, llm.StopEndTurn, nil
+	}
+
+	r := NewRouter(sender)
+	intent := "I deleted Multiply by mistake; please restore the function"
+	_, err := r.RouteWithIntent(context.Background(), "diff content here", intent)
+	if err != nil {
+		t.Fatalf("RouteWithIntent: %v", err)
+	}
+
+	if !strings.Contains(capturedUserPrompt, "deleted Multiply by mistake") {
+		t.Errorf("LLM didn't see the intent in its prompt:\n%s", capturedUserPrompt)
+	}
+	if !strings.Contains(capturedUserPrompt, "USER'S INTENT") {
+		t.Errorf("LLM prompt missing intent section:\n%s", capturedUserPrompt)
 	}
 }
 

@@ -39,6 +39,19 @@ import (
 	"github.com/vinodhalaharvi/coven/llm"
 )
 
+// IntentPromptFunc is called by the control plane to ask the user
+// what their intent is for a newly-detected commit. The implementation
+// reads from stdin (or another input source) and returns the user's
+// stated intent as a string.
+//
+// The summary parameter is a one-line description of the commit:
+// "<8-char-SHA> <subject>". The implementation may show this to the
+// user as context for the prompt.
+//
+// Returning an empty string is allowed; it means the user declined to
+// provide intent, and the router/agents will work from the diff alone.
+type IntentPromptFunc func(ctx context.Context, summary string) string
+
 // ControlPlane is the top-level orchestrator. A program (cmd/coven)
 // creates one instance, calls Run, and the control plane handles the
 // full lifecycle: detecting changes, routing them to agents, running
@@ -77,6 +90,19 @@ type Config struct {
 	// inside agent worktrees, AND for the "merge to main?" prompt
 	// at the integration step. Defaults to "always deny" (safe).
 	Confirm agent.ConfirmFunc
+
+	// IntentPrompt is called whenever coven detects a new commit on
+	// main, BEFORE routing. It receives a one-line summary of the
+	// commit (subject + author + SHA) and returns the user's stated
+	// intent for that change. The intent gets passed through to
+	// both the router and any agents the router invokes, so they
+	// can disambiguate diffs whose intent isn't obvious from the
+	// patch alone.
+	//
+	// Default behavior: returns empty string (no intent provided).
+	// In that case the router and agents work from the diff alone,
+	// matching pre-intent behavior.
+	IntentPrompt IntentPromptFunc
 
 	// Print is the user-facing output channel. Defaults to a no-op
 	// — most callers want to set this to fmt.Print or a logger.

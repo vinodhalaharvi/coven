@@ -732,3 +732,107 @@ func TestPollLoop_DoesNotSkipUserCommit(t *testing.T) {
 	cancel()
 	<-runDone
 }
+
+// TestPollLoop_CallsIntentPromptAndPassesIntentToRouter verifies
+// the full wiring: when a new commit is detected, IntentPrompt is
+// called, and the user's intent reaches the router's LLM prompt.
+func TestPollLoop_CallsIntentPromptAndPassesIntentToRouter(t *testing.T) {
+	repo := initGoProject(t)
+
+	registry.Register(registry.AgentSpec{
+		Name: "alpha", Role: "x", TypicalTriggers: "a", DomainFiles: "*", Description: "t",
+	})
+	t.Cleanup(func() { registry.Reset() })
+
+	const userIntent = "I deleted Multiply by mistake; please restore it"
+
+	var mu sync.Mutex
+	intentCalls := 0
+	intentPrompt := func(ctx context.Context, summary string) string {
+		mu.Lock()
+		intentCalls++
+		mu.Unlock()
+		return userIntent
+	}
+
+	var capturedRouterPrompt string
+	sender := func(ctx context.Context, system string, conv []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		mu.Lock()
+		for _, m := range conv {
+			if m.Role == llm.RoleUser {
+				for _, b := range m.Blocks {
+					capturedRouterPrompt += b.Text
+				}
+			}
+		}
+		mu.Unlock()
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: `{"agents":[],"reasoning":"no work"}`}},
+		}, llm.StopEndTurn, nil
+	}
+
+	cfg := Config{
+		ProjectRoot:  repo,
+		Sender:       sender,
+		Confirm:      alwaysConfirm,
+		IntentPrompt: intentPrompt,
+		Print:        func(string) {},
+		PollInterval: 50 * time.Millisecond,
+	}
+	cp := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- cp.Run(ctx) }()
+
+	// Let it start, then make a user commit.
+	time.Sleep(200 * time.Millisecond)
+	mainGo := filepath.Join(repo, "main.go")
+	currentContent, _ := os.ReadFile(mainGo)
+	if err := os.WriteFile(mainGo, []byte(string(currentContent)+"\n// trigger\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "user trigger"},
+	} {
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v: %s", strings.Join(c, " "), err, out)
+		}
+	}
+
+	// Wait for the router to be called.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := capturedRouterPrompt
+		mu.Unlock()
+		if got != "" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	cancel()
+	<-runDone
+
+	mu.Lock()
+	finalCalls := intentCalls
+	finalPrompt := capturedRouterPrompt
+	mu.Unlock()
+
+	if finalCalls == 0 {
+		t.Error("IntentPrompt was never called")
+	}
+	if !strings.Contains(finalPrompt, "deleted Multiply by mistake") {
+		t.Errorf("router prompt missing the user's intent:\n%s", finalPrompt)
+	}
+	if !strings.Contains(finalPrompt, "USER'S INTENT") {
+		t.Errorf("router prompt missing intent header:\n%s", finalPrompt)
+	}
+}

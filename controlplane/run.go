@@ -273,9 +273,17 @@ func (cp *controlPlane) processChangeset(ctx context.Context, fromSHA, toSHA str
 		return nil
 	}
 
+	// Ask the user for their intent before routing. The summary line
+	// helps the user remember what they just committed.
+	summary, _ := cp.commitSummary(ctx, toSHA)
+	intent := cp.cfg.IntentPrompt(ctx, summary)
+	if strings.TrimSpace(intent) != "" {
+		cp.cfg.Print(fmt.Sprintf("[coven v2] user intent: %s\n", truncateLog(intent, 200)))
+	}
+
 	cp.cfg.Print(fmt.Sprintf("[coven v2] routing changeset (%d bytes)...\n", len(diff)))
 
-	routing, err := cp.router.Route(ctx, diff)
+	routing, err := cp.router.RouteWithIntent(ctx, diff, intent)
 	if err != nil {
 		return fmt.Errorf("router: %w", err)
 	}
@@ -294,18 +302,28 @@ func (cp *controlPlane) processChangeset(ctx context.Context, fromSHA, toSHA str
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			cp.runOneTask(ctx, name, diff, routing.Reasoning, toSHA)
+			cp.runOneTask(ctx, name, diff, routing.Reasoning, intent, toSHA)
 		}(agentName)
 	}
 	wg.Wait()
 	return nil
 }
 
+// commitSummary returns a short string describing a commit, suitable
+// for showing the user in a prompt. Format: "<8-char-SHA> <subject>".
+func (cp *controlPlane) commitSummary(ctx context.Context, sha string) (string, error) {
+	out, err := runGitAtRootCapture(ctx, cp.cfg.ProjectRoot, "log", "-1", "--format=%h %s", sha)
+	if err != nil {
+		return shortSHAStr(sha), err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // runOneTask provisions a worktree (branched from toSHA, the just-
 // processed main commit), invokes the agent, and submits the result
 // to the integration queue. Errors are logged but don't propagate —
 // one agent's failure shouldn't block others.
-func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why, baseSHA string) {
+func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why, intent, baseSHA string) {
 	wt, err := cp.wtMgr.Provision(ctx, agentName)
 	if err != nil {
 		cp.cfg.Print(fmt.Sprintf("[%s] provision worktree: %v\n", agentName, err))
@@ -318,6 +336,7 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why, ba
 		Branch:     wt.Branch,
 		Diff:       diff,
 		Why:        why,
+		Intent:     intent,
 		BaseCommit: baseSHA,
 	}
 
@@ -606,6 +625,10 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Confirm == nil {
 		c.Confirm = func(context.Context, string, string) bool { return false }
+	}
+	if c.IntentPrompt == nil {
+		// Default: no intent. Behaves like pre-intent versions.
+		c.IntentPrompt = func(context.Context, string) string { return "" }
 	}
 	return c
 }

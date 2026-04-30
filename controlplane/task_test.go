@@ -372,3 +372,36 @@ func TestTaskRunner_ToolsAreRootedAtWorktree(t *testing.T) {
 
 // silentPrint is duplicated from agent_test.go for use in this package.
 func silentPrint(string) {}
+
+func TestBuildTaskObservation_IncludesIntent(t *testing.T) {
+	obs := buildTaskObservation(Task{
+		AgentName: "test",
+		Worktree:  "/tmp/wt",
+		Branch:    "agent-test/abc",
+		Diff:      "some diff",
+		Intent:    "I removed Multiply by accident, please restore it",
+	})
+	if !strings.Contains(obs, "USER'S STATED INTENT:") {
+		t.Errorf("observation should contain intent header:\n%s", obs)
+	}
+	if !strings.Contains(obs, "removed Multiply by accident") {
+		t.Errorf("observation should contain intent text:\n%s", obs)
+	}
+	// Should also explain how to use it.
+	if !strings.Contains(obs, "disambiguat") {
+		t.Errorf("observation should explain how intent disambiguates:\n%s", obs)
+	}
+}
+
+func TestBuildTaskObservation_NoIntentSectionWhenEmpty(t *testing.T) {
+	obs := buildTaskObservation(Task{
+		AgentName: "test",
+		Worktree:  "/tmp/wt",
+		Branch:    "agent-test/abc",
+		Diff:      "some diff",
+		// Intent left empty
+	})
+	if strings.Contains(obs, "USER'S STATED INTENT") {
+		t.Errorf("observation should not have intent section when empty:\n%s", obs)
+	}
+}

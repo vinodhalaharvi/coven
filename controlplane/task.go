@@ -59,6 +59,13 @@ type Task struct {
 	// it (vs. blindly re-deriving the whole change from scratch).
 	Why string
 
+	// Intent is the user's stated intent for this commit, captured
+	// from a prompt at routing time. May contain multi-line text.
+	// The agent's role string includes this so the agent can
+	// disambiguate when the diff alone is unclear (e.g., did the
+	// user remove function X intentionally, or by mistake?).
+	Intent string
+
 	// BaseCommit is the SHA the worktree branched from. Useful for
 	// the agent to construct git commands like "git diff HEAD" that
 	// see only the agent's own changes.
@@ -190,6 +197,11 @@ func buildTaskObservation(task Task) string {
 	var b strings.Builder
 
 	fmt.Fprintf(&b, "You have been invoked as %s-agent against a v2 task.\n\n", task.AgentName)
+
+	if task.Intent != "" {
+		fmt.Fprintf(&b, "USER'S STATED INTENT:\n%s\n\n", strings.TrimSpace(task.Intent))
+		b.WriteString("The intent above is what the user explicitly told us they want from this commit. It MAY contradict or extend what the diff shows. Treat it as the source of truth for ambiguity: if the diff alone could be interpreted multiple ways, the intent tells you which interpretation is correct. The intent does NOT authorize you to do work outside your role — it disambiguates the existing work.\n\n")
+	}
 
 	if task.Why != "" {
 		fmt.Fprintf(&b, "Routing reason: %s\n\n", task.Why)

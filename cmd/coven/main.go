@@ -118,6 +118,7 @@ func main() {
 		ProjectRoot:  absRoot,
 		Sender:       sender,
 		Confirm:      confirm,
+		IntentPrompt: makeStdinIntentPrompt(*autoConfirm),
 		Print:        print,
 		PollInterval: 1 * time.Second,
 		EnableRepair: *enableRepair,
@@ -238,6 +239,67 @@ func readLineDirect() string {
 			continue
 		}
 		b.WriteByte(buf[0])
+	}
+	return b.String()
+}
+
+// makeStdinIntentPrompt returns an IntentPromptFunc that asks the user
+// (via stdin) for their intent for a newly-detected commit.
+//
+// Per user request, intent is REQUIRED. The prompt loops until the
+// user provides at least some non-whitespace input. Multi-line input
+// is supported: a blank line ends the input.
+//
+// In auto-confirm mode, we skip the prompt and return a generic
+// "do whatever the diff suggests" string. This keeps non-interactive
+// runs (CI, tests) workable without removing the requirement in
+// interactive use.
+func makeStdinIntentPrompt(autoConfirm bool) controlplane.IntentPromptFunc {
+	return func(ctx context.Context, summary string) string {
+		if autoConfirm {
+			fmt.Fprintf(os.Stderr, "  [intent] auto-confirm: using empty intent\n")
+			return ""
+		}
+		stdinMu.Lock()
+		defer stdinMu.Unlock()
+
+		// Brief pause so prior narration settles before the prompt.
+		time.Sleep(150 * time.Millisecond)
+
+		const bar = "═══════════════════════════════════════════════════════════════"
+		fmt.Fprint(os.Stderr, "\n\n")
+		fmt.Fprintf(os.Stderr, "  %s\n", bar)
+		fmt.Fprintf(os.Stderr, "  >>> NEW COMMIT: %s\n", summary)
+		fmt.Fprintf(os.Stderr, "  %s\n", bar)
+		fmt.Fprintln(os.Stderr, "  What is your intent for this change? (multi-line OK; empty line to end)")
+
+		for {
+			lines := readMultilineDirect()
+			intent := strings.TrimSpace(lines)
+			if intent != "" {
+				fmt.Fprintln(os.Stderr, "  → intent recorded")
+				return intent
+			}
+			fmt.Fprintln(os.Stderr, "  (intent is required — please type at least one line, then a blank line to end)")
+		}
+	}
+}
+
+// readMultilineDirect reads lines from stdin until a blank line is
+// entered. Returns the joined input (without the trailing blank line).
+// Uses readLineDirect for each line.
+func readMultilineDirect() string {
+	var b strings.Builder
+	for {
+		fmt.Fprint(os.Stderr, "  > ")
+		line := readLineDirect()
+		if line == "" {
+			break
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
 	}
 	return b.String()
 }
