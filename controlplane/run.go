@@ -214,7 +214,23 @@ func (cp *controlPlane) pollLoop(ctx context.Context, st *state) error {
 			continue // no new commits
 		}
 
-		// New commits detected. Process them as one batch.
+		// Check whether the new commits are all coven's own (from a
+		// previous merge). If yes, advance state and skip — no need
+		// to route on our own work.
+		allTagged, err := allCommitsAreCovenTagged(ctx, cp.cfg.ProjectRoot, st.LastProcessedSHA, currentSHA)
+		if err == nil && allTagged {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] skipping coven-tagged commits: %s → %s\n",
+				shortSHAStr(st.LastProcessedSHA), shortSHAStr(currentSHA)))
+			st.LastProcessedSHA = currentSHA
+			if err := cp.saveState(st); err != nil {
+				cp.cfg.Print(fmt.Sprintf("[coven v2] save state: %v\n", err))
+			}
+			continue
+		}
+		// If err != nil, fall through to processing — being safe is
+		// better than silently skipping due to a transient git error.
+
+		// New user commits detected. Process them as one batch.
 		cp.cfg.Print(fmt.Sprintf("[coven v2] new commit on main: %s → %s\n",
 			shortSHAStr(st.LastProcessedSHA), shortSHAStr(currentSHA)))
 
@@ -321,6 +337,16 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why, ba
 		return
 	}
 
+	// Tag the agent's commits on this branch so the polling loop can
+	// distinguish them from user commits when they land on main.
+	// Without tagging, the integrator's merge to main would look like
+	// a fresh user commit and trigger another routing round.
+	if err := tagAgentCommits(ctx, wt.Path, "main"); err != nil {
+		cp.cfg.Print(fmt.Sprintf("[%s] warning: failed to tag commits: %v\n", agentName, err))
+		// Continue anyway — worst case we get a cascade pass that
+		// terminates harmlessly.
+	}
+
 	cp.cfg.Print(fmt.Sprintf("[%s] submitting to integrator (%s)\n", agentName, truncateLog(final, 80)))
 	if err := cp.queue.Submit(ctx, IntegrationRequest{
 		AgentName:    agentName,
@@ -388,6 +414,137 @@ func (cp *controlPlane) saveState(st *state) error {
 	return os.Rename(tmp, cp.stateFile)
 }
 
+// covenCommitPrefix marks commits that came from coven's agents (not
+// from the user). The polling loop uses this to skip its own merges
+// and avoid triggering cascade passes on agent-produced state.
+//
+// Format: every line of the commit message gets nothing special, but
+// the SUBJECT (first line) starts with this prefix. Multi-line bodies
+// are unaffected.
+const covenCommitPrefix = "[coven] "
+
+// tagAgentCommits rewrites every commit on `worktree`'s current branch
+// that's beyond the merge-base with `base` (i.e., every commit the
+// agent added) so that its subject line starts with covenCommitPrefix.
+//
+// We do this BEFORE submitting to the integrator because:
+//   1. The integrator merges via update-ref which inherits the agent's
+//      commit verbatim onto main. There's no separate merge commit to
+//      tag.
+//   2. Tagging at the source (the agent's branch, before any merge)
+//      means the tag is applied exactly once.
+//
+// The implementation uses an interactive rebase with --exec to amend
+// each commit's message. For a simple agent that produced one commit
+// (the common case) this is just one rewrite. We use git filter-branch
+// would also work but is deprecated and slow. Interactive rebase is
+// the modern equivalent.
+//
+// If a commit subject is already prefixed (idempotency), we leave it
+// alone.
+func tagAgentCommits(ctx context.Context, worktree, base string) error {
+	// Get the list of commits the agent added.
+	out, err := runGitCmdOutput(ctx, worktree, "rev-list", "--reverse", base+"..HEAD")
+	if err != nil {
+		return fmt.Errorf("rev-list: %w", err)
+	}
+	shas := []string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			shas = append(shas, line)
+		}
+	}
+	if len(shas) == 0 {
+		return nil // nothing to tag
+	}
+
+	// Common case: one commit. Just amend it.
+	if len(shas) == 1 {
+		return amendCommitWithCovenPrefix(ctx, worktree)
+	}
+
+	// Multi-commit case: reset working tree to base, then cherry-pick
+	// each original commit with an amended message.
+	//
+	// We use --hard reset (not --mixed) so the working tree matches
+	// base cleanly. Without --hard, reset --mixed leaves the agent's
+	// uncommitted file additions as untracked, and cherry-pick refuses
+	// to overwrite untracked files. The --hard reset throws away those
+	// untracked-but-actually-just-added files; cherry-pick re-applies
+	// them with the original commit's tree state.
+	if err := runGitInWorktreeNoOutput(ctx, worktree, "reset", "--hard", base); err != nil {
+		return fmt.Errorf("reset --hard to %s: %w", base, err)
+	}
+	for _, sha := range shas {
+		if err := runGitInWorktreeNoOutput(ctx, worktree, "cherry-pick", sha); err != nil {
+			return fmt.Errorf("cherry-pick %s: %w", sha[:8], err)
+		}
+		if err := amendCommitWithCovenPrefix(ctx, worktree); err != nil {
+			return fmt.Errorf("amend after cherry-pick %s: %w", sha[:8], err)
+		}
+	}
+	return nil
+}
+
+// amendCommitWithCovenPrefix amends HEAD's commit message to prepend
+// covenCommitPrefix (idempotent — won't re-prefix if already there).
+func amendCommitWithCovenPrefix(ctx context.Context, worktree string) error {
+	// Get current message.
+	out, err := runGitCmdOutput(ctx, worktree, "log", "-1", "--format=%B")
+	if err != nil {
+		return fmt.Errorf("read commit message: %w", err)
+	}
+	msg := strings.TrimRight(out, "\n")
+	if strings.HasPrefix(msg, covenCommitPrefix) {
+		return nil // already tagged
+	}
+	newMsg := covenCommitPrefix + msg
+	if err := runGitInWorktreeNoOutput(ctx, worktree, "commit", "--amend", "-m", newMsg); err != nil {
+		return fmt.Errorf("amend: %w", err)
+	}
+	return nil
+}
+
+// runGitInWorktreeNoOutput runs git in `worktree`, discarding output,
+// returning a wrapped error on failure.
+func runGitInWorktreeNoOutput(ctx context.Context, worktree string, args ...string) error {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = worktree
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// allCommitsAreCovenTagged returns true if every commit in the range
+// fromSHA..toSHA has a subject line starting with covenCommitPrefix.
+// Used by pollLoop to detect "this is coven's own merge, don't route."
+//
+// If the range is empty or git rev-list fails, returns false (safer to
+// route than to skip).
+func allCommitsAreCovenTagged(ctx context.Context, projectRoot, fromSHA, toSHA string) (bool, error) {
+	out, err := runGitAtRootCapture(ctx, projectRoot, "log", fromSHA+".."+toSHA, "--format=%s")
+	if err != nil {
+		return false, err
+	}
+	subjects := strings.Split(strings.TrimSpace(out), "\n")
+	if len(subjects) == 0 || (len(subjects) == 1 && subjects[0] == "") {
+		return false, nil
+	}
+	for _, s := range subjects {
+		if !strings.HasPrefix(s, covenCommitPrefix) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+
+// that aren't on `base`. Used to decide whether to enqueue an
+// integration request: if the agent didn't actually commit anything,
+// there's nothing to merge.
 // branchHasCommitsBeyondBase reports whether `branch` has any commits
 // that aren't on `base`. Used to decide whether to enqueue an
 // integration request: if the agent didn't actually commit anything,

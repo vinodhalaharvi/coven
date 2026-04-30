@@ -426,3 +426,309 @@ func TestPollLoop_NoRouteOnSameSHA(t *testing.T) {
 		t.Errorf("router was called %d times despite no new commits", calls)
 	}
 }
+
+// Tag-related tests.
+
+func TestTagAgentCommits_SinglesCommit_Amends(t *testing.T) {
+	repo := initTestRepo(t)
+	mgr := NewWorktreeMgr(repo)
+	wt, err := mgr.Provision(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Cleanup(context.Background(), wt)
+
+	// Make one commit on the agent's branch.
+	_ = makeFileChange(t, wt.Path, "foo.go", "package main\n", "agent did work")
+
+	// Tag.
+	if err := tagAgentCommits(context.Background(), wt.Path, "main"); err != nil {
+		t.Fatalf("tagAgentCommits: %v", err)
+	}
+
+	// Verify the commit subject was prefixed.
+	out, err := runGitCmdOutput(context.Background(), wt.Path, "log", "-1", "--format=%s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subject := strings.TrimSpace(out)
+	if !strings.HasPrefix(subject, covenCommitPrefix) {
+		t.Errorf("subject not prefixed: %q", subject)
+	}
+	if !strings.Contains(subject, "agent did work") {
+		t.Errorf("original message lost: %q", subject)
+	}
+}
+
+func TestTagAgentCommits_AlreadyTagged_NoOp(t *testing.T) {
+	repo := initTestRepo(t)
+	mgr := NewWorktreeMgr(repo)
+	wt, err := mgr.Provision(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Cleanup(context.Background(), wt)
+
+	// Make a pre-tagged commit.
+	_ = makeFileChange(t, wt.Path, "foo.go", "package main\n", covenCommitPrefix+"already tagged")
+
+	// Tag again (should be idempotent).
+	if err := tagAgentCommits(context.Background(), wt.Path, "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify subject is unchanged (not double-prefixed).
+	out, _ := runGitCmdOutput(context.Background(), wt.Path, "log", "-1", "--format=%s")
+	subject := strings.TrimSpace(out)
+	expectedPrefix := covenCommitPrefix
+	if strings.HasPrefix(subject, expectedPrefix+expectedPrefix) {
+		t.Errorf("commit was double-tagged: %q", subject)
+	}
+	if !strings.HasPrefix(subject, expectedPrefix) {
+		t.Errorf("tag lost on idempotent retag: %q", subject)
+	}
+}
+
+func TestTagAgentCommits_MultipleCommits_AllTagged(t *testing.T) {
+	repo := initTestRepo(t)
+	mgr := NewWorktreeMgr(repo)
+	wt, err := mgr.Provision(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Cleanup(context.Background(), wt)
+
+	// Make three commits in sequence.
+	_ = makeFileChange(t, wt.Path, "a.go", "package main\n", "first commit")
+	_ = makeFileChange(t, wt.Path, "b.go", "package main\n", "second commit")
+	_ = makeFileChange(t, wt.Path, "c.go", "package main\n", "third commit")
+
+	if err := tagAgentCommits(context.Background(), wt.Path, "main"); err != nil {
+		t.Fatalf("tagAgentCommits: %v", err)
+	}
+
+	// Verify each commit is prefixed.
+	out, err := runGitCmdOutput(context.Background(), wt.Path, "log", "main..HEAD", "--format=%s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := strings.Split(strings.TrimSpace(out), "\n")
+	if len(subjects) != 3 {
+		t.Fatalf("expected 3 commits, got %d:\n%s", len(subjects), out)
+	}
+	for _, s := range subjects {
+		if !strings.HasPrefix(s, covenCommitPrefix) {
+			t.Errorf("commit not tagged: %q", s)
+		}
+	}
+
+	// Verify original messages preserved.
+	allMsgs := strings.Join(subjects, "|")
+	for _, original := range []string{"first commit", "second commit", "third commit"} {
+		if !strings.Contains(allMsgs, original) {
+			t.Errorf("original message %q lost: %s", original, allMsgs)
+		}
+	}
+}
+
+func TestAllCommitsAreCovenTagged_AllTagged_ReturnsTrue(t *testing.T) {
+	repo := initTestRepo(t)
+	mgr := NewWorktreeMgr(repo)
+	wt, err := mgr.Provision(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Cleanup(context.Background(), wt)
+
+	mainSHA, _ := runGitCmdOutput(context.Background(), repo, "rev-parse", "main")
+	mainSHA = strings.TrimSpace(mainSHA)
+
+	_ = makeFileChange(t, wt.Path, "a.go", "package main\n", covenCommitPrefix+"first")
+	_ = makeFileChange(t, wt.Path, "b.go", "package main\n", covenCommitPrefix+"second")
+	endSHA, _ := runGitCmdOutput(context.Background(), wt.Path, "rev-parse", "HEAD")
+	endSHA = strings.TrimSpace(endSHA)
+
+	tagged, err := allCommitsAreCovenTagged(context.Background(), repo, mainSHA, endSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tagged {
+		t.Error("all-tagged range should return true")
+	}
+}
+
+func TestAllCommitsAreCovenTagged_MixedRange_ReturnsFalse(t *testing.T) {
+	repo := initTestRepo(t)
+	mgr := NewWorktreeMgr(repo)
+	wt, err := mgr.Provision(context.Background(), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Cleanup(context.Background(), wt)
+
+	mainSHA, _ := runGitCmdOutput(context.Background(), repo, "rev-parse", "main")
+	mainSHA = strings.TrimSpace(mainSHA)
+
+	_ = makeFileChange(t, wt.Path, "a.go", "package main\n", covenCommitPrefix+"agent commit")
+	_ = makeFileChange(t, wt.Path, "b.go", "package main\n", "user commit")
+	endSHA, _ := runGitCmdOutput(context.Background(), wt.Path, "rev-parse", "HEAD")
+	endSHA = strings.TrimSpace(endSHA)
+
+	tagged, err := allCommitsAreCovenTagged(context.Background(), repo, mainSHA, endSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tagged {
+		t.Error("mixed range should return false (presence of any non-tagged commit means route)")
+	}
+}
+
+func TestAllCommitsAreCovenTagged_EmptyRange_ReturnsFalse(t *testing.T) {
+	repo := initTestRepo(t)
+	mainSHA, _ := runGitCmdOutput(context.Background(), repo, "rev-parse", "main")
+	mainSHA = strings.TrimSpace(mainSHA)
+
+	tagged, err := allCommitsAreCovenTagged(context.Background(), repo, mainSHA, mainSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tagged {
+		t.Error("empty range should return false (don't trigger skip on empty diff)")
+	}
+}
+
+// End-to-end: polling skips coven-tagged commits.
+func TestPollLoop_SkipsCovenTaggedCommits(t *testing.T) {
+	repo := initGoProject(t)
+
+	registry.Register(registry.AgentSpec{
+		Name: "alpha", Role: "x", TypicalTriggers: "a", DomainFiles: "*", Description: "t",
+	})
+	t.Cleanup(func() { registry.Reset() })
+
+	var routerMu sync.Mutex
+	routerCallCount := 0
+	sender := func(ctx context.Context, system string, msgs []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		routerMu.Lock()
+		routerCallCount++
+		routerMu.Unlock()
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: `{"agents":[],"reasoning":"no work"}`}},
+		}, llm.StopEndTurn, nil
+	}
+
+	cfg := Config{
+		ProjectRoot:  repo,
+		Sender:       sender,
+		Confirm:      alwaysConfirm,
+		Print:        func(string) {},
+		PollInterval: 50 * time.Millisecond,
+	}
+	cp := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- cp.Run(ctx) }()
+
+	// Let it start.
+	time.Sleep(200 * time.Millisecond)
+
+	// Make a coven-tagged commit on main.
+	mainGo := filepath.Join(repo, "main.go")
+	currentContent, _ := os.ReadFile(mainGo)
+	newContent := string(currentContent) + "\n// coven did this\n"
+	if err := os.WriteFile(mainGo, []byte(newContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", covenCommitPrefix + "agent fixed something"},
+	} {
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v: %s", strings.Join(c, " "), err, out)
+		}
+	}
+
+	// Wait for poll cycles.
+	time.Sleep(800 * time.Millisecond)
+	cancel()
+	<-runDone
+
+	routerMu.Lock()
+	calls := routerCallCount
+	routerMu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("router was called %d times for a coven-tagged commit (should skip)", calls)
+	}
+}
+
+func TestPollLoop_DoesNotSkipUserCommit(t *testing.T) {
+	repo := initGoProject(t)
+
+	registry.Register(registry.AgentSpec{
+		Name: "alpha", Role: "x", TypicalTriggers: "a", DomainFiles: "*", Description: "t",
+	})
+	t.Cleanup(func() { registry.Reset() })
+
+	routerCalled := make(chan bool, 1)
+	sender := func(ctx context.Context, system string, msgs []llm.Message, tools []llm.ToolSpec) (llm.Message, llm.StopReason, error) {
+		select {
+		case routerCalled <- true:
+		default:
+		}
+		return llm.Message{
+			Role:   llm.RoleAssistant,
+			Blocks: []llm.Block{{Text: `{"agents":[],"reasoning":"no work"}`}},
+		}, llm.StopEndTurn, nil
+	}
+
+	cfg := Config{
+		ProjectRoot:  repo,
+		Sender:       sender,
+		Confirm:      alwaysConfirm,
+		Print:        func(string) {},
+		PollInterval: 50 * time.Millisecond,
+	}
+	cp := New(cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- cp.Run(ctx) }()
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Make a user (non-tagged) commit on main.
+	mainGo := filepath.Join(repo, "main.go")
+	currentContent, _ := os.ReadFile(mainGo)
+	if err := os.WriteFile(mainGo, []byte(string(currentContent)+"\n// user edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range [][]string{
+		{"git", "add", "."},
+		{"git", "commit", "-m", "user did this"},
+	} {
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v: %s", strings.Join(c, " "), err, out)
+		}
+	}
+
+	select {
+	case <-routerCalled:
+		// good
+	case <-time.After(2 * time.Second):
+		t.Error("router was not called for a user commit (should NOT skip)")
+	}
+
+	cancel()
+	<-runDone
+}
