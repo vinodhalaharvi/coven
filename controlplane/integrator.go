@@ -430,28 +430,55 @@ func (in *Integrator) Process(ctx context.Context, req IntegrationRequest) Integ
 	mergeCommit := strings.TrimSpace(mergeCommitOut)
 	result.MergeCommit = mergeCommit
 
-	// Fast-forward main to the merge commit by directly updating the
-	// branch pointer. We DON'T use 'git merge --ff-only' from the
-	// project root because that touches the working tree — and if the
-	// user has uncommitted changes (which is the common case in coven,
-	// since they're actively editing files), git refuses the merge.
+	// Move main's branch pointer to the merge commit, then sync the
+	// working tree to the new main while preserving any user edits.
 	//
-	// 'git update-ref' moves the branch pointer without touching the
-	// working tree. The user's uncommitted edits stay exactly as they
-	// are. Their next 'git status' will show their edits relative to
-	// the new main (which now includes the agent's resolution), but
-	// that's the correct behavior — it surfaces any divergence for
-	// the user to handle.
-	//
-	// We also need to handle the case where the project root's HEAD
-	// is currently checked out as the temp worktree's parent — i.e.,
-	// the agent's branch was based on main, and main is at the same
-	// commit as the temp worktree's parent. In that case, update-ref
-	// is fine.
+	// IMPORTANT order of operations:
+	//   1. Stash any user uncommitted changes RELATIVE TO OLD MAIN.
+	//      This must happen BEFORE update-ref. Otherwise the working
+	//      tree's "deletion" of files that are in the new main but
+	//      not yet in the working tree gets captured by the stash —
+	//      and then re-applied during pop, undoing the merge in the
+	//      working tree.
+	//   2. update-ref to advance main's pointer.
+	//   3. git reset --hard HEAD: aligns working tree + index to the
+	//      new HEAD. Working tree files are recreated from HEAD's
+	//      tree, files no longer in HEAD's tree are removed.
+	//   4. Pop the stash if we created one. May produce conflicts if
+	//      user's edits collide with the merge — surface those for
+	//      manual resolution.
+	stashed, err := in.stashUserEditsIfDirty(ctx)
+	if err != nil {
+		result.Outcome = OutcomeError
+		result.MergeError = fmt.Errorf("pre-merge stash: %w", err)
+		return result
+	}
+
 	if _, err := in.runGitInProject(ctx, "update-ref", "refs/heads/main", mergeCommit); err != nil {
+		// Try to restore stash on error.
+		if stashed {
+			_, _ = in.runGitInProject(ctx, "stash", "pop")
+		}
 		result.Outcome = OutcomeError
 		result.MergeError = fmt.Errorf("update-ref refs/heads/main: %w", err)
 		return result
+	}
+
+	if _, err := in.runGitInProject(ctx, "reset", "--hard", "HEAD"); err != nil {
+		// Try to pop stash before giving up on sync; main is still
+		// updated correctly so this is a non-fatal warning.
+		if stashed {
+			_, _ = in.runGitInProject(ctx, "stash", "pop")
+		}
+		in.cfg.Print(fmt.Sprintf("  ⚠ working tree sync failed: %v\n", err))
+		in.cfg.Print("    main has the new content. Run 'git status' to see your tree state.\n")
+	} else if stashed {
+		popOut, err := in.runGitInProject(ctx, "stash", "pop")
+		if err != nil {
+			in.cfg.Print("  ⚠ Your uncommitted edits conflict with the new main and need manual resolution.\n")
+			in.cfg.Print("    Run 'git status' to see conflicts, fix them, then 'git stash drop' when done.\n")
+			in.cfg.Print(fmt.Sprintf("    git stash pop output: %s\n", strings.TrimSpace(popOut)))
+		}
 	}
 
 	// 6. Cleanup the agent's worktree on success.
@@ -482,6 +509,33 @@ func (in *Integrator) runGitInProject(ctx context.Context, args ...string) (stri
 	cmd.Dir = in.cfg.ProjectRoot
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// stashUserEditsIfDirty stashes the user's uncommitted edits if the
+// working tree has any. Returns whether a stash was created.
+//
+// Called BEFORE update-ref so the stash captures the user's actual
+// changes (relative to current main), not the divergence that
+// update-ref would introduce.
+//
+// Returns false (and nil error) if the working tree is clean.
+func (in *Integrator) stashUserEditsIfDirty(ctx context.Context) (bool, error) {
+	statusOut, err := in.runGitInProject(ctx, "status", "--porcelain")
+	if err != nil {
+		return false, fmt.Errorf("git status: %w", err)
+	}
+	if strings.TrimSpace(statusOut) == "" {
+		return false, nil
+	}
+
+	stashOut, err := in.runGitInProject(ctx, "stash", "push", "-u", "-m", "coven: pre-merge stash")
+	if err != nil {
+		return false, fmt.Errorf("git stash: %w: %s", err, strings.TrimSpace(stashOut))
+	}
+	// "No local changes to save" means stash didn't actually create
+	// a stash entry (e.g., everything was ignored).
+	stashed := !strings.Contains(stashOut, "No local changes to save")
+	return stashed, nil
 }
 
 // workingTreeDivergence returns true and a short summary if the
