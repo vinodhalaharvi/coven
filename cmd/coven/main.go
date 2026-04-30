@@ -254,6 +254,13 @@ func readLineDirect() string {
 // "do whatever the diff suggests" string. This keeps non-interactive
 // runs (CI, tests) workable without removing the requirement in
 // interactive use.
+// minIntentLength is the minimum number of characters an intent must
+// contain to be accepted. Set high enough to reject muscle-memory
+// inputs like "y" or "ok" but low enough to allow terse legitimate
+// intents like "fix the build" (14 chars) or "add tests" (9 chars,
+// borderline but rejected — user will rephrase).
+const minIntentLength = 15
+
 func makeStdinIntentPrompt(autoConfirm bool) controlplane.IntentPromptFunc {
 	return func(ctx context.Context, summary string) string {
 		if autoConfirm {
@@ -266,21 +273,40 @@ func makeStdinIntentPrompt(autoConfirm bool) controlplane.IntentPromptFunc {
 		// Brief pause so prior narration settles before the prompt.
 		time.Sleep(150 * time.Millisecond)
 
-		const bar = "═══════════════════════════════════════════════════════════════"
+		// Visually distinct from the y/n confirm prompt (which uses
+		// '═══' bars and 'CONFIRM' header). The intent prompt is a
+		// fundamentally different action from y/n, so it gets its own
+		// look. This prevents users in y/n muscle memory from
+		// accidentally typing 'y' as their intent.
+		const bar = "▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓"
 		fmt.Fprint(os.Stderr, "\n\n")
 		fmt.Fprintf(os.Stderr, "  %s\n", bar)
-		fmt.Fprintf(os.Stderr, "  >>> NEW COMMIT: %s\n", summary)
+		fmt.Fprintf(os.Stderr, "  ▓▓▓ INTENT REQUIRED — describe what you want done\n")
+		fmt.Fprintf(os.Stderr, "  ▓▓▓ Commit: %s\n", summary)
 		fmt.Fprintf(os.Stderr, "  %s\n", bar)
-		fmt.Fprintln(os.Stderr, "  What is your intent for this change? (multi-line OK; empty line to end)")
+		fmt.Fprintln(os.Stderr, "  Type a sentence or two describing what you want from this change.")
+		fmt.Fprintln(os.Stderr, "  (multi-line OK; press Enter on a blank line to finish)")
+		fmt.Fprintln(os.Stderr, "  Examples:")
+		fmt.Fprintln(os.Stderr, "    • 'I deleted Multiply by accident, please restore it'")
+		fmt.Fprintln(os.Stderr, "    • 'Add tests for the new Subtract function'")
+		fmt.Fprintln(os.Stderr, "    • 'Just a typo fix, no agent work needed'")
 
 		for {
 			lines := readMultilineDirect()
 			intent := strings.TrimSpace(lines)
-			if intent != "" {
-				fmt.Fprintln(os.Stderr, "  → intent recorded")
-				return intent
+			if intent == "" {
+				fmt.Fprintln(os.Stderr, "  (intent is required — please describe what you want, then blank line to end)")
+				continue
 			}
-			fmt.Fprintln(os.Stderr, "  (intent is required — please type at least one line, then a blank line to end)")
+			if len(intent) < minIntentLength {
+				fmt.Fprintf(os.Stderr, "  (that's too short — please describe what you want in at least %d characters; 'y' is not a valid intent)\n", minIntentLength)
+				continue
+			}
+			fmt.Fprintln(os.Stderr, "  → intent recorded:")
+			for _, ln := range strings.Split(intent, "\n") {
+				fmt.Fprintf(os.Stderr, "      %s\n", ln)
+			}
+			return intent
 		}
 	}
 }
