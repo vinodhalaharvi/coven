@@ -1,80 +1,92 @@
 // run.go is the orchestration layer that ties everything together.
 //
-// The control plane subscribes to fsnotify events via fsmonitor,
-// debounces them into a settle window, takes the resulting changeset
-// as a git diff, asks the router which agents should handle it,
-// fans the work out into worktrees with task adapters, and lets the
-// integrator queue serialize the merges.
+// MODEL: commit-based triggering.
 //
-// In short: events → debounce → diff → route → fan-out → integrate.
+// coven polls the project's main branch SHA. When it advances, coven
+// processes the new commit(s): builds a diff against the previously-
+// processed SHA, asks the router which agents should react, fans out
+// agent tasks in worktrees, and lets the integrator queue serialize
+// the merges back to main.
 //
-// What's deliberately NOT here:
-//   - Cycle suppression. When the integrator merges to main, fsnotify
-//     fires and we route the merge content through the same pipeline.
-//     This is INTENTIONAL — that's how cascades work (proto-agent's
-//     output wakes connect-agent). The router decides what to do with
-//     the merge content; if it correctly excludes the agent that just
-//     produced the changes, the cascade terminates naturally.
-//   - Cross-changeset state. Each routing decision is independent.
-//     We don't remember "we just ran this agent" — if the diff says
-//     it should run again, it does.
+// One commit = one round of agent work. After each round, lastProcessed
+// advances to wherever main is now (post-merge), and coven goes back
+// to polling. There is NO automatic cascade: if proto-agent's output
+// should wake connect-agent, the user must commit something to trigger
+// the next round. This is a deliberate design choice — auto-cascade
+// previously caused noisy verify passes and made stop conditions
+// circular. Now the user drives the cycle with commits.
 //
-// These are deliberate simplifications. If real cascades create
-// pathological loops, we add suppression then. Until then, simpler
-// is better.
+// State persistence:
+//
+//   .coven/state.json holds {LastProcessedSHA}. On startup, coven
+//   reads this; if there are unprocessed commits since, they all get
+//   collapsed into one routing decision (we diff lastProcessed..main).
+//   This survives restarts cleanly.
+//
+// Why polling and not git hooks:
+//
+//   Git hooks require installation in .git/hooks/, which means the
+//   user has to set them up. They also don't fire for commits made
+//   from outside the repo (e.g., 'git commit -a' from another tool,
+//   GUI clients, etc.). Polling is simpler, universal, and the cost
+//   is trivial — once-per-second 'git rev-parse' is essentially free.
 package controlplane
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/vinodhalaharvi/coven/algebra/blackboard"
-	"github.com/vinodhalaharvi/coven/fsmonitor"
 )
 
-// Real ControlPlane implementation that replaces the stub from
-// session 1. Kept inside controlplane to avoid exporting the
-// orchestration internals.
+// controlPlane is the real ControlPlane implementation.
 type controlPlane struct {
 	cfg Config
 
-	router      *Router
-	wtMgr       *WorktreeMgr
-	taskRunner  *TaskRunner
-	integrator  *Integrator
-	queue       *IntegrationQueue
-	allowList   *AllowList
+	router     *Router
+	wtMgr      *WorktreeMgr
+	taskRunner *TaskRunner
+	integrator *Integrator
+	queue      *IntegrationQueue
+	allowList  *AllowList
 
-	// fsBoard is the blackboard fsmonitor publishes to. Subscribers
-	// read from it via blackboard.Subscribe.
-	fsBoard *blackboard.Board[fsmonitor.FileChangeFact]
+	// stateFile is the persistence path: <ProjectRoot>/.coven/state.json
+	stateFile string
 }
 
-// New constructs a real ControlPlane from a Config. Returns the
-// stub if Config doesn't have the minimum required fields (so
-// existing callers continue to work).
+// state is the persisted state of the polling loop.
+type state struct {
+	// LastProcessedSHA is the most recent main SHA coven has fully
+	// processed (routed and merged any agent work for). On the next
+	// poll, if main has advanced, the diff sent to the router is
+	// LastProcessedSHA..currentMain.
+	LastProcessedSHA string `json:"last_processed_sha"`
+}
+
+// New constructs a real ControlPlane from a Config. Returns the stub
+// if Config doesn't have the minimum required fields (preserves
+// session-1 behavior for callers that pass empty configs).
 func New(cfg Config) ControlPlane {
 	cfg = cfg.withDefaults()
 
-	// Without a project root, we can't do anything meaningful.
-	// Fall back to the stub.
 	if cfg.ProjectRoot == "" {
 		return &stub{}
 	}
 
-	cp := &controlPlane{cfg: cfg}
+	cp := &controlPlane{
+		cfg:       cfg,
+		stateFile: filepath.Join(cfg.ProjectRoot, ".coven", "state.json"),
+	}
 
 	cp.allowList = NewAllowList()
 	cp.wtMgr = NewWorktreeMgr(cfg.ProjectRoot)
 	cp.queue = NewIntegrationQueue(32)
-	cp.fsBoard = blackboard.New[fsmonitor.FileChangeFact](blackboard.Config{})
 
 	if cfg.Sender != nil {
 		cp.router = NewRouter(cfg.Sender)
@@ -98,7 +110,6 @@ func New(cfg Config) ControlPlane {
 	}
 	in, err := NewIntegrator(intCfg)
 	if err != nil {
-		// Bad config — fall back to stub. Logged on first Run call.
 		cp.integrator = nil
 	} else {
 		cp.integrator = in
@@ -118,76 +129,54 @@ func (cp *controlPlane) Run(ctx context.Context) error {
 
 	cp.cfg.Print(fmt.Sprintf("[coven v2] watching %s\n", cp.cfg.ProjectRoot))
 
-	// Recover from any leftover worktrees from a prior crash.
+	// Recover from any leftover worktrees and orphan branches from a
+	// prior crashed run.
 	if err := cp.wtMgr.CleanupOrphans(ctx); err != nil {
 		cp.cfg.Print(fmt.Sprintf("[coven v2] cleanup orphans: %v\n", err))
 	}
 
-	// Start fsmonitor.
-	fsCtx, fsCancel := context.WithCancel(ctx)
-	defer fsCancel()
-	fsErr := make(chan error, 1)
-	go func() {
-		fsErr <- fsmonitor.Run(fsCtx, fsmonitor.Config{
-			Root:       cp.cfg.ProjectRoot,
-			Debounce:   200 * time.Millisecond,
-			IgnoreFile: ignoreInternalPaths(cp.cfg.ProjectRoot),
-			Board:      cp.fsBoard,
-			Author:     "controlplane",
-		})
-	}()
-
-	// Start integrator.
+	// Start integrator goroutine.
 	intErr := make(chan error, 1)
 	go func() {
 		intErr <- cp.integrator.Run(ctx, cp.queue)
 	}()
 
-	// Subscribe to fsmonitor facts and feed the orchestration loop.
-	subFn := fsmonitor.Subscribe(cp.fsBoard, fsmonitor.AnyFiles)
-	events, err := subFn(ctx)
+	// Load persisted state (or initialize).
+	st, err := cp.loadState()
 	if err != nil {
-		return fmt.Errorf("subscribe to fsmonitor: %w", err)
+		return fmt.Errorf("load state: %w", err)
 	}
 
-	// Initial diff check: if the working tree has uncommitted changes
-	// at startup, treat them as a freshly-settled changeset and route
-	// immediately. Without this, the user has to make a fresh edit
-	// after starting coven to wake the system — work they did before
-	// 'coven' was running is invisible.
-	//
-	// Run in a goroutine so it doesn't block dispatchLoop startup.
-	// dispatchLoop is what consumes both events AND the timer that
-	// expires when this initial check fires. If we did the check
-	// synchronously here, we'd block the channel read.
-	go func() {
-		// Small delay so fsmonitor finishes its initial directory walk
-		// before we route. Otherwise we could race ahead of the watcher
-		// being fully established.
-		select {
-		case <-time.After(200 * time.Millisecond):
-		case <-ctx.Done():
-			return
+	// If state has no LastProcessedSHA, initialize it to current main.
+	// This means the first run on a fresh project will NOT process any
+	// pre-existing history — coven only acts on commits made AFTER it
+	// starts watching. If the user wants a specific older SHA processed,
+	// they can manually edit state.json or make a commit.
+	if st.LastProcessedSHA == "" {
+		currentSHA, err := cp.headSHA(ctx)
+		if err != nil {
+			return fmt.Errorf("read current main SHA: %w", err)
 		}
-		cp.cfg.Print("[coven v2] startup: checking for existing changes\n")
-		if err := cp.handleChangeset(ctx); err != nil {
-			cp.cfg.Print(fmt.Sprintf("[coven v2] startup dispatch error: %v\n", err))
+		st.LastProcessedSHA = currentSHA
+		if err := cp.saveState(st); err != nil {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] save state: %v\n", err))
 		}
-	}()
+		cp.cfg.Print(fmt.Sprintf("[coven v2] starting from main at %s\n", shortSHAStr(currentSHA)))
+	} else {
+		cp.cfg.Print(fmt.Sprintf("[coven v2] resuming from last processed %s\n", shortSHAStr(st.LastProcessedSHA)))
+	}
 
-	// Run the debouncer + dispatch loop.
-	if err := cp.dispatchLoop(ctx, events); err != nil {
+	// Run polling loop.
+	if err := cp.pollLoop(ctx, st); err != nil {
+		// Drain integrator before returning.
+		select {
+		case <-intErr:
+		case <-time.After(2 * time.Second):
+		}
 		return err
 	}
 
-	// Drain background goroutines.
-	select {
-	case err := <-fsErr:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return fmt.Errorf("fsmonitor: %w", err)
-		}
-	case <-time.After(2 * time.Second):
-	}
+	// ctx cancelled — drain integrator.
 	select {
 	case err := <-intErr:
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -198,54 +187,77 @@ func (cp *controlPlane) Run(ctx context.Context) error {
 	return nil
 }
 
-// dispatchLoop is the v2 orchestration heart. Receives debounced
-// events and turns them into routing + fan-out actions.
+// pollLoop watches main's SHA. When it advances, processes the new
+// commits.
 //
-// Blocks until ctx is cancelled or events channel closes.
-func (cp *controlPlane) dispatchLoop(ctx context.Context, events <-chan fsmonitor.FileChangeFact) error {
-	settle := cp.cfg.Settle
-	timer := time.NewTimer(time.Hour) // initially "never"
-	timer.Stop()
+// Loop invariant: at the top of each iteration, st.LastProcessedSHA
+// reflects what we've fully handled. After a successful round, we
+// advance it to the new main SHA (post-merge if the agent work
+// landed).
+func (cp *controlPlane) pollLoop(ctx context.Context, st *state) error {
+	ticker := time.NewTicker(cp.cfg.PollInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case _, ok := <-events:
-			if !ok {
-				return nil
-			}
-			// Reset the settle timer.
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(settle)
-		case <-timer.C:
-			// Settle window expired — process what's there.
-			if err := cp.handleChangeset(ctx); err != nil {
-				cp.cfg.Print(fmt.Sprintf("[coven v2] dispatch error: %v\n", err))
-			}
+		case <-ticker.C:
+		}
+
+		currentSHA, err := cp.headSHA(ctx)
+		if err != nil {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] poll error: %v\n", err))
+			continue
+		}
+		if currentSHA == st.LastProcessedSHA {
+			continue // no new commits
+		}
+
+		// New commits detected. Process them as one batch.
+		cp.cfg.Print(fmt.Sprintf("[coven v2] new commit on main: %s → %s\n",
+			shortSHAStr(st.LastProcessedSHA), shortSHAStr(currentSHA)))
+
+		if err := cp.processChangeset(ctx, st.LastProcessedSHA, currentSHA); err != nil {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] process error: %v\n", err))
+			// Even on error, advance lastProcessed so we don't keep retrying
+			// the same broken commit. Better to skip than to loop forever.
+		}
+
+		// Advance lastProcessed to whatever main is NOW (might include
+		// agent-merged commits made during processChangeset).
+		newSHA, err := cp.headSHA(ctx)
+		if err == nil {
+			st.LastProcessedSHA = newSHA
+		} else {
+			st.LastProcessedSHA = currentSHA
+		}
+		if err := cp.saveState(st); err != nil {
+			cp.cfg.Print(fmt.Sprintf("[coven v2] save state: %v\n", err))
 		}
 	}
 }
 
-// handleChangeset is called when the settle timer expires. Builds the
-// diff, calls the router, fans out tasks, queues them for integration.
-func (cp *controlPlane) handleChangeset(ctx context.Context) error {
-	diff, err := buildDiff(ctx, cp.cfg.ProjectRoot)
+// processChangeset handles one changeset: routes it to agents, fans out
+// tasks, waits for them all to complete (whether merged, failed, or
+// skipped). Returns when all agent tasks are done.
+//
+// Note: this is synchronous from the polling loop's perspective. Agent
+// tasks run in parallel internally (each in a goroutine), but the
+// integrator processes their integration requests serially via the
+// queue.
+func (cp *controlPlane) processChangeset(ctx context.Context, fromSHA, toSHA string) error {
+	diff, err := cp.gitDiff(ctx, fromSHA, toSHA)
 	if err != nil {
-		return fmt.Errorf("build diff: %w", err)
+		return fmt.Errorf("git diff %s..%s: %w", fromSHA[:8], toSHA[:8], err)
 	}
 	if strings.TrimSpace(diff) == "" {
-		// Nothing meaningful changed (whitespace-only or pure
-		// metadata). Skip without an LLM call.
+		// Could happen if the only commits in this range are empty
+		// (--allow-empty) or if SHAs reference the same tree. Skip.
 		return nil
 	}
 
-	cp.cfg.Print(fmt.Sprintf("[coven v2] changeset detected (%d bytes); routing...\n", len(diff)))
+	cp.cfg.Print(fmt.Sprintf("[coven v2] routing changeset (%d bytes)...\n", len(diff)))
 
 	routing, err := cp.router.Route(ctx, diff)
 	if err != nil {
@@ -266,25 +278,23 @@ func (cp *controlPlane) handleChangeset(ctx context.Context) error {
 		wg.Add(1)
 		go func(name string) {
 			defer wg.Done()
-			cp.runOneTask(ctx, name, diff, routing.Reasoning)
+			cp.runOneTask(ctx, name, diff, routing.Reasoning, toSHA)
 		}(agentName)
 	}
 	wg.Wait()
 	return nil
 }
 
-// runOneTask provisions a worktree, invokes the agent against it,
-// and submits the result to the integration queue. Errors are logged
-// but don't propagate — one agent's failure shouldn't block others.
-func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why string) {
+// runOneTask provisions a worktree (branched from toSHA, the just-
+// processed main commit), invokes the agent, and submits the result
+// to the integration queue. Errors are logged but don't propagate —
+// one agent's failure shouldn't block others.
+func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why, baseSHA string) {
 	wt, err := cp.wtMgr.Provision(ctx, agentName)
 	if err != nil {
 		cp.cfg.Print(fmt.Sprintf("[%s] provision worktree: %v\n", agentName, err))
 		return
 	}
-
-	// Get the base commit SHA so the agent knows what it's working from.
-	baseCommit, _ := getHeadSHA(ctx, cp.cfg.ProjectRoot)
 
 	task := Task{
 		AgentName:  agentName,
@@ -292,7 +302,7 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why str
 		Branch:     wt.Branch,
 		Diff:       diff,
 		Why:        why,
-		BaseCommit: baseCommit,
+		BaseCommit: baseSHA,
 	}
 
 	cp.cfg.Print(fmt.Sprintf("[%s] task starting in %s\n", agentName, shortBranch(wt.Branch)))
@@ -300,13 +310,10 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why str
 	final, err := cp.taskRunner.Run(ctx, task)
 	if err != nil {
 		cp.cfg.Print(fmt.Sprintf("[%s] task error: %v\n", agentName, err))
-		// Cleanup worktree on error — no integration to run.
 		_ = cp.wtMgr.Cleanup(ctx, wt)
 		return
 	}
 
-	// Did the agent actually commit anything? If the branch has no
-	// commits beyond its base, there's nothing to integrate.
 	hasCommits, _ := branchHasCommitsBeyondBase(ctx, cp.cfg.ProjectRoot, wt.Branch, "main")
 	if !hasCommits {
 		cp.cfg.Print(fmt.Sprintf("[%s] no changes committed; cleaning up\n", agentName))
@@ -314,7 +321,6 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why str
 		return
 	}
 
-	// Submit to integrator queue.
 	cp.cfg.Print(fmt.Sprintf("[%s] submitting to integrator (%s)\n", agentName, truncateLog(final, 80)))
 	if err := cp.queue.Submit(ctx, IntegrationRequest{
 		AgentName:    agentName,
@@ -328,109 +334,58 @@ func (cp *controlPlane) runOneTask(ctx context.Context, agentName, diff, why str
 	}
 }
 
-// buildDiff produces the unified diff representing all uncommitted
-// changes (working tree vs HEAD), including untracked files.
-//
-// Untracked files are made visible by `git add -N` first — this is
-// "intent to add" mode that doesn't actually stage content but causes
-// `git diff HEAD` to show new files. Side-effect-free from the user's
-// perspective.
-//
-// Binary file diffs are stripped from the output. git represents them
-// as 4-line blocks ending in "Binary files ... differ" — these are
-// useless to the router (Claude can't reason about binary content)
-// and add noise to routing decisions. We keep the file-presence
-// information by leaving a one-line marker.
-func buildDiff(ctx context.Context, projectRoot string) (string, error) {
-	// Stage intent-to-add for untracked files.
-	if err := runGitAtRoot(ctx, projectRoot, "add", "-N", "."); err != nil {
-		return "", fmt.Errorf("git add -N: %w", err)
-	}
-	// Get the diff.
-	out, err := runGitAtRootCapture(ctx, projectRoot, "diff", "HEAD")
-	if err != nil {
-		return "", fmt.Errorf("git diff HEAD: %w", err)
-	}
-	return stripBinaryDiffs(out), nil
-}
-
-// stripBinaryDiffs removes the file-diff blocks that represent binary
-// content from a unified diff. Replaces each one with a one-line
-// summary so the router still knows the file changed.
-//
-// A binary diff block in git output looks like:
-//
-//	diff --git a/path b/path
-//	new file mode 100755
-//	index 0000000..0fdd330
-//	Binary files /dev/null and b/path differ
-//
-// The 4th line is the giveaway. We detect blocks ending in
-// "Binary files ... differ" and replace them with:
-//
-//	diff --git a/path b/path
-//	[binary file change suppressed]
-//
-// preserving the file-list signal but dropping content the router
-// can't use.
-func stripBinaryDiffs(diff string) string {
-	if !strings.Contains(diff, "Binary files") {
-		return diff
-	}
-
-	var out strings.Builder
-	var blockStart int = -1
-	lines := strings.Split(diff, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "diff --git ") {
-			// Flush pending block if it wasn't binary.
-			if blockStart >= 0 {
-				for _, prev := range lines[blockStart:i] {
-					out.WriteString(prev)
-					out.WriteString("\n")
-				}
-			}
-			blockStart = i
-			continue
-		}
-		if blockStart >= 0 && strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, " differ") {
-			// This block is binary — write the diff header + marker, skip rest.
-			out.WriteString(lines[blockStart])
-			out.WriteString("\n")
-			out.WriteString("[binary file change suppressed]\n")
-			// Find the next diff --git or end of input.
-			for j := i + 1; j < len(lines); j++ {
-				if strings.HasPrefix(lines[j], "diff --git ") {
-					blockStart = j
-					break
-				}
-				if j == len(lines)-1 {
-					blockStart = -1
-				}
-			}
-			// If we reached end without finding another diff, blockStart=-1.
-			// Otherwise blockStart points at the next diff header, which we'll
-			// process on the next iteration. Skip ahead.
-			continue
-		}
-	}
-	// Flush any remaining non-binary block.
-	if blockStart >= 0 {
-		for _, line := range lines[blockStart:] {
-			out.WriteString(line)
-			out.WriteString("\n")
-		}
-	}
-	return out.String()
-}
-
-// getHeadSHA returns the current HEAD commit SHA at the project root.
-func getHeadSHA(ctx context.Context, projectRoot string) (string, error) {
-	out, err := runGitAtRootCapture(ctx, projectRoot, "rev-parse", "HEAD")
+// gitDiff returns the diff between two commits.
+func (cp *controlPlane) gitDiff(ctx context.Context, fromSHA, toSHA string) (string, error) {
+	out, err := runGitAtRootCapture(ctx, cp.cfg.ProjectRoot, "diff", fromSHA, toSHA)
 	if err != nil {
 		return "", err
 	}
+	return out, nil
+}
+
+// headSHA returns the current SHA of refs/heads/main.
+func (cp *controlPlane) headSHA(ctx context.Context) (string, error) {
+	out, err := runGitAtRootCapture(ctx, cp.cfg.ProjectRoot, "rev-parse", "main")
+	if err != nil {
+		return "", fmt.Errorf("rev-parse main: %w: %s", err, strings.TrimSpace(out))
+	}
 	return strings.TrimSpace(out), nil
+}
+
+// loadState reads .coven/state.json. Returns a fresh state if the file
+// doesn't exist or is unreadable.
+func (cp *controlPlane) loadState() (*state, error) {
+	data, err := os.ReadFile(cp.stateFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &state{}, nil
+		}
+		return nil, err
+	}
+	var st state
+	if err := json.Unmarshal(data, &st); err != nil {
+		// Treat malformed state file as if it didn't exist; warn and
+		// continue rather than crashing on a corrupted JSON file.
+		cp.cfg.Print(fmt.Sprintf("[coven v2] state file corrupt, reinitializing: %v\n", err))
+		return &state{}, nil
+	}
+	return &st, nil
+}
+
+// saveState writes .coven/state.json atomically.
+func (cp *controlPlane) saveState(st *state) error {
+	if err := os.MkdirAll(filepath.Dir(cp.stateFile), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := cp.stateFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, cp.stateFile)
 }
 
 // branchHasCommitsBeyondBase reports whether `branch` has any commits
@@ -452,7 +407,7 @@ func runGitAtRoot(ctx context.Context, root string, args ...string) error {
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(out))
+		return fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -475,41 +430,19 @@ func truncateLog(s string, max int) string {
 	return s[:max] + "..."
 }
 
-// ignoreInternalPaths returns an fsmonitor.IgnoreFile predicate that
-// suppresses events for paths coven itself manages.
-//
-// Without this filter, agents writing files inside their worktrees
-// (.coven/worktrees/<agent>-<uuid>/...) would fire fsnotify events
-// that propagate to the dispatcher, triggering routing on coven's
-// own internal activity. That creates infinite-loop hazards in
-// cascades.
-//
-// We ignore:
-//   - everything under <project>/.coven/ (worktrees and any future
-//     internal state)
-//   - .git/ (git's internal files; not normally written during
-//     normal operation but defensive)
-//
-// The predicate receives absolute paths. The check is a string-prefix
-// match against the absolute project root + "/.coven" (or "/.git").
-func ignoreInternalPaths(projectRoot string) func(string) bool {
-	covenInternal := projectRoot + string(os.PathSeparator) + ".coven"
-	gitInternal := projectRoot + string(os.PathSeparator) + ".git"
-	return func(absPath string) bool {
-		if strings.HasPrefix(absPath, covenInternal) {
-			return true
-		}
-		if strings.HasPrefix(absPath, gitInternal) {
-			return true
-		}
-		return false
+// shortSHAStr returns the first 8 chars of a SHA for log readability.
+// Named -Str to avoid conflict with integrator's shortSHA.
+func shortSHAStr(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
 	}
+	return sha
 }
 
 // withDefaults populates Config zero values with sensible defaults.
 func (c Config) withDefaults() Config {
-	if c.Settle <= 0 {
-		c.Settle = 2500 * time.Millisecond
+	if c.PollInterval <= 0 {
+		c.PollInterval = 1 * time.Second
 	}
 	if c.Print == nil {
 		c.Print = func(string) {}

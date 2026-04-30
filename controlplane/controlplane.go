@@ -82,10 +82,11 @@ type Config struct {
 	// — most callers want to set this to fmt.Print or a logger.
 	Print agent.PrintFunc
 
-	// Settle is the debounce window for file change events. Multiple
-	// events within this window are coalesced into a single routing
-	// decision. Default 2.5 seconds.
-	Settle time.Duration
+	// PollInterval is how often coven checks the main branch's SHA for
+	// new commits. Default 1 second. Lower values give faster reaction
+	// to commits but increase the rate of 'git rev-parse' calls (which
+	// is essentially free, but worth being deliberate about).
+	PollInterval time.Duration
 
 	// Validators (optional) overrides the default validator set
 	// (go build/vet/test). Pass a custom registry to add proto/sql/

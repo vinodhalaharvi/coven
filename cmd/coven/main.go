@@ -119,7 +119,7 @@ func main() {
 		Sender:       sender,
 		Confirm:      confirm,
 		Print:        print,
-		Settle:       2500 * time.Millisecond,
+		PollInterval: 1 * time.Second,
 		EnableRepair: *enableRepair,
 	})
 
